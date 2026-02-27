@@ -1,0 +1,9 @@
+{
+  "plugin_id": "musicbrainz",
+  "name": "MusicBrainz",
+  "version": "1.0.0",
+  "author": "Chronicle Contributors",
+  "description": "Fetches music metadata (albums, artists, tracks) from MusicBrainz. No API key required.",
+  "min_chronicle_version": "0.1.0",
+  "entry_type": "Chronicle.Plugin.MusicBrainz.MusicBrainzMetadataProvider"
+}
