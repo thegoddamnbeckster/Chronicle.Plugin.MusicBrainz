@@ -17,7 +17,7 @@ internal static class MusicBrainzSearcher
         var items = (result?.Artists ?? []).Select(a => new MediaMetadata
         {
             ExternalId = $"artist:{a.Id}",
-            Source     = "musicbrainz",
+            Source     = "MusicBrainz",
             Title      = a.Name ?? string.Empty,
             Overview   = BuildArtistSummary(a),
             Year       = ParseYear(a.LifeSpan?.Begin)
@@ -34,7 +34,7 @@ internal static class MusicBrainzSearcher
         var items = (result?.ReleaseGroups ?? []).Select(rg => new MediaMetadata
         {
             ExternalId = $"release-group:{rg.Id}",
-            Source     = "musicbrainz",
+            Source     = "MusicBrainz",
             Title      = rg.Title ?? string.Empty,
             Overview   = rg.PrimaryType is not null
                 ? $"{rg.PrimaryType}{(rg.SecondaryTypes?.Count > 0 ? " (" + string.Join(", ", rg.SecondaryTypes) + ")" : "")}"
@@ -53,7 +53,7 @@ internal static class MusicBrainzSearcher
         var items = (result?.Recordings ?? []).Select(r => new MediaMetadata
         {
             ExternalId     = $"recording:{r.Id}",
-            Source         = "musicbrainz",
+            Source         = "MusicBrainz",
             Title          = r.Title ?? string.Empty,
             RuntimeMinutes = r.Length.HasValue ? r.Length.Value / 60000 : null,
             Year           = ParseYear(r.FirstReleaseDate)

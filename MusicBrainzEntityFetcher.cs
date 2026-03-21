@@ -47,7 +47,7 @@ internal static class MusicBrainzEntityFetcher
         return new MediaMetadata
         {
             ExternalId     = $"artist:{artist.Id}",
-            Source         = "musicbrainz",
+            Source         = "MusicBrainz",
             Title          = artist.Name ?? string.Empty,
             Overview       = BuildBio(artist),
             Year           = MusicBrainzSearcher.ParseYear(artist.LifeSpan?.Begin),
@@ -83,7 +83,7 @@ internal static class MusicBrainzEntityFetcher
         return new MediaMetadata
         {
             ExternalId = $"release-group:{rg.Id}",
-            Source     = "musicbrainz",
+            Source     = "MusicBrainz",
             Title      = rg.Title ?? string.Empty,
             Overview   = string.IsNullOrEmpty(creditedArtist) ? rg.PrimaryType : $"{rg.PrimaryType} by {creditedArtist}",
             Year       = MusicBrainzSearcher.ParseYear(rg.FirstReleaseDate),
@@ -124,7 +124,7 @@ internal static class MusicBrainzEntityFetcher
         return new MediaMetadata
         {
             ExternalId     = $"recording:{rec.Id}",
-            Source         = "musicbrainz",
+            Source         = "MusicBrainz",
             Title          = rec.Title ?? string.Empty,
             Year           = MusicBrainzSearcher.ParseYear(rec.FirstReleaseDate),
             PosterUrl      = coverUrl,

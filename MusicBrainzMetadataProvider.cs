@@ -150,7 +150,6 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         {
             "artist"        => await MusicBrainzEntityFetcher.FetchArtistAsync(_client!, mbid, ct),
             "release-group" => await MusicBrainzEntityFetcher.FetchReleaseGroupAsync(_client!, mbid, ct),
-            "release"       => await MusicBrainzEntityFetcher.FetchReleaseGroupAsync(_client!, mbid, ct),
             "recording"     => await MusicBrainzEntityFetcher.FetchRecordingAsync(_client!, mbid, ct),
             _ => throw new ArgumentException($"Unknown MusicBrainz entity type: {type}")
         };
