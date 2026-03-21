@@ -171,7 +171,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         try
         {
             var json = await _client!.GetAsync(
-                "artist/4a4ee089-93b9-4a56-a4f0-9f234f0cb04f?fmt=json", ct).ConfigureAwait(false);
+                "artist/a74b1b7f-71a5-4011-9441-d0b5e4122711?fmt=json", ct).ConfigureAwait(false);
             return json.Contains("Radiohead");
         }
         catch { return false; }
