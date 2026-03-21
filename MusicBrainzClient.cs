@@ -1,106 +1,87 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Net;
 
 namespace Chronicle.Plugin.MusicBrainz;
 
 /// <summary>
-/// Thin wrapper around the MusicBrainz JSON Web Service v2.
-/// <para>
-/// MusicBrainz requires a descriptive User-Agent for all requests:
-/// https://wiki.musicbrainz.org/MusicBrainz_API/Rate_Limiting
-/// </para>
+/// Thread-safe MusicBrainz API client with built-in rate limiting.
+/// Anonymous: 1 req/sec. Authenticated (HTTP Digest): 5 req/sec.
 /// </summary>
-internal sealed class MusicBrainzClient
+internal sealed class MusicBrainzClient : IDisposable
 {
-    private const string BaseUrl = "https://musicbrainz.org/ws/2";
-
-    // MusicBrainz cover art is served by the Cover Art Archive
-    private const string CoverArtBase = "https://coverartarchive.org/release/";
+    private const string BaseUrl      = "https://musicbrainz.org/ws/2";
+    private const string CoverArtBase = "https://coverartarchive.org";
 
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _throttle = new(1, 1);
+    private DateTime _lastRequest = DateTime.MinValue;
+    private readonly TimeSpan _minInterval;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    public MusicBrainzClient(string userAgent, string? username, string? password)
     {
-        PropertyNameCaseInsensitive = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    };
+        _minInterval = string.IsNullOrEmpty(username)
+            ? TimeSpan.FromMilliseconds(1100)   // 1 req/sec anonymous
+            : TimeSpan.FromMilliseconds(220);   // 5 req/sec authenticated
 
-    public MusicBrainzClient(HttpClient http)
-    {
-        _http = http;
+        var handler = new HttpClientHandler();
+        if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+        {
+            handler.Credentials = new NetworkCredential(username, password);
+            handler.PreAuthenticate = true;
+        }
+
+        _http = new HttpClient(handler);
+        _http.DefaultRequestHeaders.Add("User-Agent", userAgent);
+        _http.DefaultRequestHeaders.Add("Accept", "application/json");
+        _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
-    // ── Releases ──────────────────────────────────────────────────────────────
-
-    public Task<MbReleaseSearch> SearchReleasesAsync(string query, CancellationToken ct = default)
+    /// <summary>GET MusicBrainz API path (auto-throttled).</summary>
+    public async Task<string> GetAsync(string path, CancellationToken ct = default)
     {
-        var url = $"{BaseUrl}/release?query={Uri.EscapeDataString(query)}&fmt=json&limit=20&inc=artist-credits+release-groups+genres";
-        return GetAsync<MbReleaseSearch>(url, ct);
+        await ThrottleAsync(ct);
+        var url = $"{BaseUrl}/{path.TrimStart('/')}";
+        var response = await _http.GetAsync(url, ct);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync(ct);
     }
 
-    public Task<MbRelease> GetReleaseAsync(string mbid, CancellationToken ct = default)
+    /// <summary>GET Cover Art Archive (auto-throttled). Returns "{}" on 404.</summary>
+    public async Task<string> GetCoverArtAsync(string path, CancellationToken ct = default)
     {
-        var url = $"{BaseUrl}/release/{mbid}?fmt=json&inc=artist-credits+release-groups+recordings+genres+label-infos";
-        return GetAsync<MbRelease>(url, ct);
+        await ThrottleAsync(ct);
+        var url = $"{CoverArtBase}/{path.TrimStart('/')}";
+        var response = await _http.GetAsync(url, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound) return "{}";
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync(ct);
     }
 
-    // ── Artists ───────────────────────────────────────────────────────────────
-
-    public Task<MbArtistSearch> SearchArtistsAsync(string query, CancellationToken ct = default)
+    /// <summary>Download raw image bytes (auto-throttled).</summary>
+    public async Task<byte[]> GetBytesAsync(string url, CancellationToken ct = default)
     {
-        var url = $"{BaseUrl}/artist?query={Uri.EscapeDataString(query)}&fmt=json&limit=20&inc=genres";
-        return GetAsync<MbArtistSearch>(url, ct);
+        await ThrottleAsync(ct);
+        return await _http.GetByteArrayAsync(url, ct);
     }
 
-    public Task<MbArtist> GetArtistAsync(string mbid, CancellationToken ct = default)
+    private async Task ThrottleAsync(CancellationToken ct)
     {
-        var url = $"{BaseUrl}/artist/{mbid}?fmt=json&inc=genres+releases";
-        return GetAsync<MbArtist>(url, ct);
-    }
-
-    // ── Cover art (Cover Art Archive) ─────────────────────────────────────────
-
-    /// <summary>
-    /// Downloads the front cover art for a release MBID.
-    /// Returns an empty array if no cover art exists (HTTP 404).
-    /// </summary>
-    public async Task<byte[]> GetCoverArtAsync(string releaseMbid, CancellationToken ct = default)
-    {
-        var url = $"{CoverArtBase}{releaseMbid}/front-500";
-        var response = await _http.GetAsync(url, ct).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) return [];
-        return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-    }
-
-    /// <summary>Returns the URL for a release's front cover art (500 px), or null.</summary>
-    public static string? CoverArtUrl(string releaseMbid) =>
-        $"{CoverArtBase}{releaseMbid}/front-500";
-
-    // ── Health ────────────────────────────────────────────────────────────────
-
-    public async Task<bool> PingAsync(CancellationToken ct = default)
-    {
+        await _throttle.WaitAsync(ct);
         try
         {
-            // Lightweight lookup — any valid entity
-            var url = $"{BaseUrl}/release?query=title:a&limit=1&fmt=json";
-            var response = await _http.GetAsync(url, ct).ConfigureAwait(false);
-            return response.IsSuccessStatusCode;
+            var elapsed = DateTime.UtcNow - _lastRequest;
+            if (elapsed < _minInterval)
+                await Task.Delay(_minInterval - elapsed, ct);
+            _lastRequest = DateTime.UtcNow;
         }
-        catch
+        finally
         {
-            return false;
+            _throttle.Release();
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private async Task<T> GetAsync<T>(string url, CancellationToken ct)
+    public void Dispose()
     {
-        var response = await _http.GetAsync(url, ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        return await JsonSerializer.DeserializeAsync<T>(stream, JsonOptions, ct).ConfigureAwait(false)
-               ?? throw new InvalidOperationException("MusicBrainz returned null response.");
+        _throttle.Dispose();
+        _http.Dispose();
     }
 }
