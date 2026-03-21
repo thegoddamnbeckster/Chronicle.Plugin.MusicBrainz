@@ -6,14 +6,12 @@ namespace Chronicle.Plugin.MusicBrainz;
 
 internal static class MusicBrainzSearcher
 {
-    private static readonly JsonSerializerOptions Opts = new() { PropertyNameCaseInsensitive = true };
-
     public static async Task<MediaMetadata> SearchArtistsAsync(
         MusicBrainzClient client, string query, CancellationToken ct)
     {
         var encoded = Uri.EscapeDataString(query);
         var json = await client.GetAsync($"artist?query={encoded}&limit=10&fmt=json", ct);
-        var result = JsonSerializer.Deserialize<MbSearchResult<MbArtist>>(json, Opts);
+        var result = JsonSerializer.Deserialize<MbSearchResult<MbArtist>>(json, MusicBrainzJsonOptions.Opts);
         var items = (result?.Artists ?? []).Select(a => new MediaMetadata
         {
             ExternalId = $"artist:{a.Id}",
@@ -30,7 +28,7 @@ internal static class MusicBrainzSearcher
     {
         var encoded = Uri.EscapeDataString(query);
         var json = await client.GetAsync($"release-group?query={encoded}&limit=10&fmt=json", ct);
-        var result = JsonSerializer.Deserialize<MbSearchResult<MbReleaseGroup>>(json, Opts);
+        var result = JsonSerializer.Deserialize<MbSearchResult<MbReleaseGroup>>(json, MusicBrainzJsonOptions.Opts);
         var items = (result?.ReleaseGroups ?? []).Select(rg => new MediaMetadata
         {
             ExternalId = $"release-group:{rg.Id}",
@@ -49,13 +47,13 @@ internal static class MusicBrainzSearcher
     {
         var encoded = Uri.EscapeDataString(query);
         var json = await client.GetAsync($"recording?query={encoded}&limit=10&fmt=json", ct);
-        var result = JsonSerializer.Deserialize<MbSearchResult<MbRecording>>(json, Opts);
+        var result = JsonSerializer.Deserialize<MbSearchResult<MbRecording>>(json, MusicBrainzJsonOptions.Opts);
         var items = (result?.Recordings ?? []).Select(r => new MediaMetadata
         {
             ExternalId     = $"recording:{r.Id}",
             Source         = "MusicBrainz",
             Title          = r.Title ?? string.Empty,
-            RuntimeMinutes = r.Length.HasValue ? r.Length.Value / 60000 : null,
+            RuntimeMinutes = r.Length.HasValue ? (int)Math.Round(r.Length.Value / 60000.0) : null,
             Year           = ParseYear(r.FirstReleaseDate)
         }).ToList();
         return new MediaMetadata { Results = items, TotalResults = result?.Count ?? 0 };

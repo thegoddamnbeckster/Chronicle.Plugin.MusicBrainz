@@ -5,15 +5,13 @@ namespace Chronicle.Plugin.MusicBrainz;
 
 internal static class CoverArtArchiveClient
 {
-    private static readonly JsonSerializerOptions Opts = new() { PropertyNameCaseInsensitive = true };
-
     /// <summary>Fetch all images for a release or release-group from the Cover Art Archive.</summary>
     public static async Task<List<CaaImage>> GetImagesAsync(
         MusicBrainzClient client, string entityType, string mbid, CancellationToken ct)
     {
         var json = await client.GetCoverArtAsync($"{entityType}/{mbid}", ct);
         if (json == "{}") return [];
-        var response = JsonSerializer.Deserialize<CaaResponse>(json, Opts);
+        var response = JsonSerializer.Deserialize<CaaResponse>(json, MusicBrainzJsonOptions.Opts);
         return response?.Images ?? [];
     }
 

@@ -6,8 +6,6 @@ namespace Chronicle.Plugin.MusicBrainz;
 
 internal static class MusicBrainzEntityFetcher
 {
-    private static readonly JsonSerializerOptions Opts = new() { PropertyNameCaseInsensitive = true };
-
     private const string ArtistIncludes =
         "recordings+releases+release-groups+works+aliases+tags+genres+ratings+url-rels+artist-rels";
     private const string ReleaseGroupIncludes =
@@ -25,23 +23,25 @@ internal static class MusicBrainzEntityFetcher
         MusicBrainzClient client, string mbid, CancellationToken ct)
     {
         var json = await client.GetAsync($"artist/{mbid}?inc={ArtistIncludes}&fmt=json", ct);
-        var artist = JsonSerializer.Deserialize<MbArtist>(json, Opts)
+        var artist = JsonSerializer.Deserialize<MbArtist>(json, MusicBrainzJsonOptions.Opts)
             ?? throw new InvalidOperationException($"Empty response for artist {mbid}");
 
         var artistImageUrl = ExtractWikimediaImageUrl(artist.Relations);
 
         // Fetch cover art for first 5 release groups
         var allImages = new List<object>();
+        var allRawImages = new List<CaaImage>();
         foreach (var rg in (artist.ReleaseGroups ?? []).Take(5))
         {
             if (rg.Id is null) continue;
             var images = await CoverArtArchiveClient.GetImagesAsync(client, "release-group", rg.Id, ct);
+            allRawImages.AddRange(images);
             allImages.AddRange(CoverArtArchiveClient.ToStorageFormat(images));
         }
 
         var posterUrl = artistImageUrl
-            ?? (artist.ReleaseGroups?.FirstOrDefault()?.Id is { } firstRgId
-                ? $"https://coverartarchive.org/release-group/{firstRgId}/front-250"
+            ?? (allRawImages.Count > 0
+                ? (allRawImages.FirstOrDefault(i => i.Front)?.Image ?? allRawImages[0].Image)
                 : null);
 
         return new MediaMetadata
@@ -63,7 +63,8 @@ internal static class MusicBrainzEntityFetcher
         MusicBrainzClient client, string mbid, CancellationToken ct)
     {
         var json = await client.GetAsync($"release-group/{mbid}?inc={ReleaseGroupIncludes}&fmt=json", ct);
-        var rg = JsonSerializer.Deserialize<MbReleaseGroup>(json, Opts)!;
+        var rg = JsonSerializer.Deserialize<MbReleaseGroup>(json, MusicBrainzJsonOptions.Opts)
+            ?? throw new InvalidOperationException($"Empty response for release-group {mbid}");
 
         // Full detail for up to 20 releases in this group
         var releases = new List<object>();
@@ -71,7 +72,7 @@ internal static class MusicBrainzEntityFetcher
         {
             if (release.Id is null) continue;
             var releaseJson = await client.GetAsync($"release/{release.Id}?inc={ReleaseIncludes}&fmt=json", ct);
-            var full = JsonSerializer.Deserialize<MbRelease>(releaseJson, Opts);
+            var full = JsonSerializer.Deserialize<MbRelease>(releaseJson, MusicBrainzJsonOptions.Opts);
             if (full is not null) releases.Add(MapRelease(full));
         }
 
@@ -99,7 +100,8 @@ internal static class MusicBrainzEntityFetcher
         MusicBrainzClient client, string mbid, CancellationToken ct)
     {
         var json = await client.GetAsync($"recording/{mbid}?inc={RecordingIncludes}&fmt=json", ct);
-        var rec = JsonSerializer.Deserialize<MbRecording>(json, Opts)!;
+        var rec = JsonSerializer.Deserialize<MbRecording>(json, MusicBrainzJsonOptions.Opts)
+            ?? throw new InvalidOperationException($"Empty response for recording {mbid}");
 
         // Fetch linked works (compositions)
         var works = new List<object>();
@@ -107,7 +109,7 @@ internal static class MusicBrainzEntityFetcher
         {
             if (rel.Work?.Id is null) continue;
             var workJson = await client.GetAsync($"work/{rel.Work.Id}?inc={WorkIncludes}&fmt=json", ct);
-            var work = JsonSerializer.Deserialize<MbWork>(workJson, Opts);
+            var work = JsonSerializer.Deserialize<MbWork>(workJson, MusicBrainzJsonOptions.Opts);
             if (work is not null) works.Add(MapWork(work));
         }
 
@@ -128,7 +130,7 @@ internal static class MusicBrainzEntityFetcher
             Title          = rec.Title ?? string.Empty,
             Year           = MusicBrainzSearcher.ParseYear(rec.FirstReleaseDate),
             PosterUrl      = coverUrl,
-            RuntimeMinutes = rec.Length.HasValue ? rec.Length.Value / 60000 : null,
+            RuntimeMinutes = rec.Length.HasValue ? (int)Math.Round(rec.Length.Value / 60000.0) : null,
             Genres         = rec.Genres?.Select(g => g.Name ?? "").Where(g => g != "").ToList() ?? [],
             Rating         = rec.Rating?.Value,
         };
