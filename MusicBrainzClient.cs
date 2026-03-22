@@ -35,7 +35,14 @@ internal sealed class MusicBrainzClient : IDisposable
         _http.Timeout = TimeSpan.FromSeconds(30);
     }
 
-    /// <summary>GET MusicBrainz API path (auto-throttled, retries on 503).</summary>
+    /// <summary>Test-only constructor that accepts a pre-built HttpClient and throttle interval.</summary>
+    internal MusicBrainzClient(HttpClient http, TimeSpan minInterval)
+    {
+        _http        = http;
+        _minInterval = minInterval;
+    }
+
+    /// <summary>GET MusicBrainz API path (auto-throttled, retries on 503 and 200+error body).</summary>
     public async Task<string> GetAsync(string path, CancellationToken ct = default)
     {
         const int maxRetries = 4;
@@ -44,7 +51,9 @@ internal sealed class MusicBrainzClient : IDisposable
         for (int attempt = 0; ; attempt++)
         {
             await ThrottleAsync(ct);
-            var url = $"{BaseUrl}/{path.TrimStart('/')}";
+            var url = _http.BaseAddress is not null
+                ? new Uri(_http.BaseAddress, path.TrimStart('/')).ToString()
+                : $"{BaseUrl}/{path.TrimStart('/')}";
             var response = await _http.GetAsync(url, ct);
 
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable && attempt < maxRetries)
@@ -58,7 +67,23 @@ internal sealed class MusicBrainzClient : IDisposable
             }
 
             response.EnsureSuccessStatusCode();
-            return await response.Content.ReadAsStringAsync(ct);
+            var content = await response.Content.ReadAsStringAsync(ct);
+
+            // MusicBrainz sometimes returns HTTP 200 with a JSON error body instead of 503
+            // when rate-limiting. Detect this and treat it identically to a 503 so that the
+            // retry logic fires rather than silently treating the error as "no results".
+            if (content.Contains("\"error\"", StringComparison.Ordinal) && attempt < maxRetries)
+            {
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+                continue;
+            }
+
+            if (content.Contains("\"error\"", StringComparison.Ordinal))
+                throw new HttpRequestException(
+                    $"MusicBrainz returned an error response after {attempt + 1} attempt(s): {content[..Math.Min(content.Length, 200)]}");
+
+            return content;
         }
     }
 

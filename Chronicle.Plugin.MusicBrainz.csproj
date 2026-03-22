@@ -21,6 +21,14 @@
     <PackageReference Include="System.Text.Json"          Version="9.0.3" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <InternalsVisibleTo>Chronicle.Plugin.MusicBrainz.Tests</InternalsVisibleTo>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="manifest.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
