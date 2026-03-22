@@ -13,7 +13,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     public string PluginId => "chronicle.plugin.musicbrainz";
     public string Name     => "MusicBrainz";
-    public string Version  => "1.0.0";
+    public string Version  => "1.0.2";
     public string Author   => "Chronicle Contributors";
 
     // ── Settings keys ─────────────────────────────────────────────────────────
@@ -121,14 +121,35 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         CancellationToken ct = default)
     {
         EnsureConfigured();
+
+        // Explicit prefix in query takes priority over mediaType parameter.
+        // EnrichOneAsync prefixes music queries with "artist:", "album:", or "track:"
+        // based on the item's position in the hierarchy so the right entity is searched.
+        MediaMetadata container;
         if (query.StartsWith("artist:", StringComparison.OrdinalIgnoreCase))
-            return await MusicBrainzSearcher.SearchArtistsAsync(_client!, query[7..].Trim(), ct);
-        if (query.StartsWith("album:", StringComparison.OrdinalIgnoreCase))
-            return await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query[6..].Trim(), ct);
-        if (query.StartsWith("track:", StringComparison.OrdinalIgnoreCase))
-            return await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query[6..].Trim(), ct);
-        // Default: artist search
-        return await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct);
+            container = await MusicBrainzSearcher.SearchArtistsAsync(_client!, query[7..].Trim(), ct);
+        else if (query.StartsWith("album:", StringComparison.OrdinalIgnoreCase))
+            container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query[6..].Trim(), ct);
+        else if (query.StartsWith("track:", StringComparison.OrdinalIgnoreCase))
+            container = await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query[6..].Trim(), ct);
+        else
+            // No prefix: route by mediaType parameter
+            container = mediaType switch
+            {
+                "artist" => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
+                "album"  => await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct),
+                "music"  => await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query, ct),
+                _        => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
+            };
+
+        // EnrichOneAsync checks result.ExternalId — pick the best match (first/highest-scored)
+        // and return it directly so the enrichment service can record it.
+        // Preserve Results list so UI search previews still work.
+        var best = container.Results?.FirstOrDefault();
+        if (best is null) return container; // no results → ExternalId stays null → NotFound
+        best.Results     = container.Results;
+        best.TotalResults = container.TotalResults;
+        return best;
     }
 
     // ── IMetadataProvider: get by ID ──────────────────────────────────────────

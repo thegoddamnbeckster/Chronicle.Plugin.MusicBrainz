@@ -195,6 +195,29 @@ public class MbSearchResult<T>
     [JsonPropertyName("recordings")]     public List<T>? Recordings { get; set; }
 }
 
+// Converter that reads a JSON value as a string regardless of whether the token
+// is a number or a quoted string — needed because Cover Art Archive image IDs
+// are returned as bare JSON numbers that exceed Int64 range.
+public class AnyValueAsStringConverter : System.Text.Json.Serialization.JsonConverter<string?>
+{
+    public override string? Read(ref System.Text.Json.Utf8JsonReader reader,
+        Type typeToConvert, System.Text.Json.JsonSerializerOptions options) =>
+        reader.TokenType switch
+        {
+            System.Text.Json.JsonTokenType.Number => System.Text.Encoding.UTF8.GetString(reader.ValueSpan),
+            System.Text.Json.JsonTokenType.String => reader.GetString(),
+            System.Text.Json.JsonTokenType.Null   => null,
+            _                                     => System.Text.Encoding.UTF8.GetString(reader.ValueSpan)
+        };
+
+    public override void Write(System.Text.Json.Utf8JsonWriter writer, string? value,
+        System.Text.Json.JsonSerializerOptions options)
+    {
+        if (value is null) writer.WriteNullValue();
+        else writer.WriteStringValue(value);
+    }
+}
+
 // Cover Art Archive models
 public class CaaResponse
 {
@@ -204,7 +227,10 @@ public class CaaResponse
 
 public class CaaImage
 {
-    [JsonPropertyName("id")]         public long Id { get; set; }
+    // Cover Art Archive IDs exceed Int64 range — use converter to accept numeric JSON tokens.
+    [JsonPropertyName("id")]
+    [System.Text.Json.Serialization.JsonConverter(typeof(AnyValueAsStringConverter))]
+    public string? Id { get; set; }
     [JsonPropertyName("types")]      public List<string>? Types { get; set; }
     [JsonPropertyName("front")]      public bool Front { get; set; }
     [JsonPropertyName("back")]       public bool Back { get; set; }
