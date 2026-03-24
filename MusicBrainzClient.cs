@@ -32,7 +32,7 @@ internal sealed class MusicBrainzClient : IDisposable
         _http = new HttpClient(handler);
         _http.DefaultRequestHeaders.Add("User-Agent", userAgent);
         _http.DefaultRequestHeaders.Add("Accept", "application/json");
-        _http.Timeout = TimeSpan.FromSeconds(30);
+        _http.Timeout = TimeSpan.FromSeconds(90);
     }
 
     /// <summary>Test-only constructor that accepts a pre-built HttpClient and throttle interval.</summary>
@@ -87,15 +87,22 @@ internal sealed class MusicBrainzClient : IDisposable
         }
     }
 
-    /// <summary>GET Cover Art Archive (auto-throttled). Returns "{}" on 404.</summary>
+    /// <summary>
+    /// GET Cover Art Archive (auto-throttled).
+    /// Returns "{}" for 404 (no images) and for any other non-success status.
+    /// CAA can return 401/403/500 for releases with no CAA entry or during outages.
+    /// Cover art is supplemental — callers must not fail enrichment because of it.
+    /// </summary>
     public async Task<string> GetCoverArtAsync(string path, CancellationToken ct = default)
     {
         await ThrottleAsync(ct);
         var url = $"{CoverArtBase}/{path.TrimStart('/')}";
         var response = await _http.GetAsync(url, ct);
-        if (response.StatusCode == HttpStatusCode.NotFound) return "{}";
-        response.EnsureSuccessStatusCode();
-        return await response.Content.ReadAsStringAsync(ct);
+        if (response.IsSuccessStatusCode)
+            return await response.Content.ReadAsStringAsync(ct);
+        // Any non-success (404 = no art, 401/403/500 = CAA unavailable for this release)
+        // is treated as "no cover art available" — never throw from a supplemental fetch.
+        return "{}";
     }
 
     /// <summary>Download raw image bytes (auto-throttled).</summary>

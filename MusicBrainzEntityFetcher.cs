@@ -13,7 +13,7 @@ internal static class MusicBrainzEntityFetcher
     private const string ReleaseIncludes =
         "artists+recordings+release-groups+labels+media+tags+genres+url-rels+artist-credits+isrcs";
     private const string RecordingIncludes =
-        "artists+releases+tags+genres+isrcs+url-rels+artist-rels+work-rels+artist-credits";
+        "artists+releases+release-groups+tags+genres+isrcs+url-rels+artist-rels+work-rels+artist-credits";
     private const string WorkIncludes =
         "artist-rels+url-rels";
 
@@ -122,7 +122,7 @@ internal static class MusicBrainzEntityFetcher
             Genres           = (artist.Genres ?? []).Select(g => g.Name ?? "").Where(g => g != "").ToList(),
             Cast             = members,
             Tags             = tags,
-            Rating           = artist.Rating?.Value,
+            Rating           = artist.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
             AdditionalImages = additionalImages,
             ExtendedData     = extendedData,
         };
@@ -200,7 +200,7 @@ internal static class MusicBrainzEntityFetcher
             Genres           = (rg.Genres ?? []).Select(g => g.Name ?? "").Where(g => g != "").ToList(),
             Cast             = creditedArtists,
             Tags             = tags,
-            Rating           = rg.Rating?.Value,
+            Rating           = rg.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
             AdditionalImages = additionalImages,
             ExtendedData     = extendedData,
         };
@@ -240,11 +240,18 @@ internal static class MusicBrainzEntityFetcher
             }
         }
 
-        // Cover art from up to 5 releases — collect front, back, and all images
+        // Cover art from up to 5 releases — prefer studio album releases over compilations/singles.
+        // MusicBrainz returns releases in arbitrary order; a track may appear on dozens of
+        // compilations whose cover art has nothing to do with the original album.
+        var sortedReleases = (rec.Releases ?? [])
+            .OrderBy(r => IsStudioAlbum(r) ? 0 : 1)   // studio albums first
+            .Take(5)
+            .ToList();
+
         string? coverUrl    = null;
         string? backdropUrl = null;
         var allCoverImages  = new List<CaaImage>();
-        foreach (var release in (rec.Releases ?? []).Take(5))
+        foreach (var release in sortedReleases)
         {
             if (release.Id is null) continue;
             var releaseImages = await CoverArtArchiveClient.GetImagesAsync(client, "release", release.Id, ct);
@@ -309,13 +316,28 @@ internal static class MusicBrainzEntityFetcher
             Cast             = creditedArtists,
             Directors        = directors,
             Tags             = tags,
-            Rating           = rec.Rating?.Value,
+            Rating           = rec.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
             AdditionalImages = additionalImages,
             ExtendedData     = extendedData,
         };
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns true if the release is a studio album (PrimaryType=Album,
+    /// no Compilation/Live/Soundtrack/DJ-mix/Interview secondary type).
+    /// Used to prefer original album art over compilation cover art for tracks.
+    /// </summary>
+    private static bool IsStudioAlbum(MbRelease release)
+    {
+        var rg = release.ReleaseGroup;
+        if (rg is null) return false;
+        if (!string.Equals(rg.PrimaryType, "Album", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var nonAlbumSecondary = new[] { "Compilation", "Live", "Soundtrack", "DJ-mix", "Interview", "Mixtape/Street", "Demo", "Spokenword" };
+        return !(rg.SecondaryTypes ?? []).Any(s => nonAlbumSecondary.Contains(s, StringComparer.OrdinalIgnoreCase));
+    }
 
     /// <summary>
     /// Extracts a direct Wikimedia Commons image URL from artist relations.

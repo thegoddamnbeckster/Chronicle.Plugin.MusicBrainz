@@ -13,7 +13,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     public string PluginId => "chronicle.plugin.musicbrainz";
     public string Name     => "MusicBrainz";
-    public string Version  => "1.0.2";
+    public string Version  => "1.0.3";
     public string Author   => "Chronicle Contributors";
 
     // ── Settings keys ─────────────────────────────────────────────────────────
@@ -159,12 +159,25 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     /// e.g. "release-group:f4179994-7621-4a46-b272-c62d8b3b9b1b"
     ///      "artist:5b11f4ce-a62d-471e-81fc-a69a8278c7da"
     ///      "recording:e14a55f4-ef25-4e35-bd5e-920f7af42d5c"
+    ///
+    /// Also accepts full MusicBrainz URLs:
+    ///      "https://musicbrainz.org/artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da"
     /// </summary>
     public async Task<MediaMetadata> GetByIdAsync(string externalId, CancellationToken ct = default)
     {
         EnsureConfigured();
+
+        // Normalise: accept full MusicBrainz URLs by extracting type and MBID from the path.
+        // e.g. https://musicbrainz.org/artist/5b11f4ce-... → artist:5b11f4ce-...
+        if (externalId.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            externalId = NormalizeUrl(externalId);
+
         var sep = externalId.IndexOf(':');
-        if (sep < 0) throw new ArgumentException($"Invalid MusicBrainz ID format: {externalId}");
+        if (sep < 0)
+            throw new ArgumentException(
+                $"Invalid MusicBrainz ID format: '{externalId}'. " +
+                "Expected 'type:mbid' (e.g. artist:5b11f4ce-...) or a MusicBrainz URL.");
+
         var type = externalId[..sep];
         var mbid = externalId[(sep + 1)..];
         return type switch
@@ -172,8 +185,31 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             "artist"        => await MusicBrainzEntityFetcher.FetchArtistAsync(_client!, mbid, ct),
             "release-group" => await MusicBrainzEntityFetcher.FetchReleaseGroupAsync(_client!, mbid, ct),
             "recording"     => await MusicBrainzEntityFetcher.FetchRecordingAsync(_client!, mbid, ct),
-            _ => throw new ArgumentException($"Unknown MusicBrainz entity type: {type}")
+            _ => throw new ArgumentException(
+                $"Unknown MusicBrainz entity type: '{type}'. " +
+                "Supported types: artist, release-group, recording.")
         };
+    }
+
+    /// <summary>
+    /// Converts a MusicBrainz browser URL to the internal "type:mbid" format.
+    /// Handles both /artist/ and /release-group/ path segments.
+    /// </summary>
+    private static string NormalizeUrl(string url)
+    {
+        Uri uri;
+        try { uri = new Uri(url); }
+        catch (UriFormatException)
+        {
+            throw new ArgumentException($"Cannot parse MusicBrainz URL: '{url}'");
+        }
+
+        // AbsolutePath: /artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da
+        var segments = uri.AbsolutePath.Trim('/').Split('/');
+        if (segments.Length < 2 || string.IsNullOrWhiteSpace(segments[1]))
+            throw new ArgumentException($"Cannot extract entity type and MBID from URL: '{url}'");
+
+        return $"{segments[0]}:{segments[1]}";
     }
 
     // ── IMetadataProvider: image ──────────────────────────────────────────────

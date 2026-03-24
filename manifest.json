@@ -1,9 +1,10 @@
 {
   "plugin_id": "chronicle.plugin.musicbrainz",
   "name": "MusicBrainz",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "author": "Chronicle Contributors",
   "description": "Fetches comprehensive music metadata from MusicBrainz (artist, album, track) and cover art from the Cover Art Archive. No API key required.",
+  "fixMatchHint": "Enter a MusicBrainz URL (e.g. https://musicbrainz.org/artist/…) or typed ID (artist:…, release-group:…, recording:…)",
   "min_chronicle_version": "0.1.0",
   "entry_type": "Chronicle.Plugin.MusicBrainz.MusicBrainzMetadataProvider",
   "iconUrl": "https://musicbrainz.org/favicon.ico",
