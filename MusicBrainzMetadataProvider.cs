@@ -117,40 +117,104 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     // ── IMetadataProvider: search ─────────────────────────────────────────────
 
-    public async Task<MediaMetadata> SearchAsync(string query, string mediaType,
-        CancellationToken ct = default)
+    // Matches a trailing " (YYYY)" year suffix — used when stripping release year from names.
+    private static readonly System.Text.RegularExpressions.Regex YearSuffixRe =
+        new(@"\s*\((\d{4})\)\s*$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public async Task<IReadOnlyList<ScoredCandidate>> SearchAsync(
+        MediaSearchContext context, CancellationToken ct = default)
     {
         EnsureConfigured();
 
-        // Explicit prefix in query takes priority over mediaType parameter.
-        // EnrichOneAsync prefixes music queries with "artist:", "album:", or "track:"
-        // based on the item's position in the hierarchy so the right entity is searched.
-        MediaMetadata container;
-        if (query.StartsWith("artist:", StringComparison.OrdinalIgnoreCase))
-            container = await MusicBrainzSearcher.SearchArtistsAsync(_client!, query[7..].Trim(), ct);
-        else if (query.StartsWith("album:", StringComparison.OrdinalIgnoreCase))
-            container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query[6..].Trim(), ct);
-        else if (query.StartsWith("track:", StringComparison.OrdinalIgnoreCase))
-            container = await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query[6..].Trim(), ct);
-        else
-            // No prefix: route by mediaType parameter
-            container = mediaType switch
-            {
-                "artist" => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
-                "album"  => await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct),
-                "music"  => await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query, ct),
-                _        => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
-            };
+        // Route to the right MusicBrainz endpoint and build a Lucene query from context.
+        MediaMetadata container = context.HierarchyLevel switch
+        {
+            0 => await MusicBrainzSearcher.SearchArtistsAsync(
+                     _client!, MbQuote(context.Name), ct),
+            1 => await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                     _client!, BuildAlbumQuery(context), ct),
+            2 => await MusicBrainzSearcher.SearchRecordingsAsync(
+                     _client!, BuildTrackQuery(context), ct),
+            _ => await MusicBrainzSearcher.SearchArtistsAsync(
+                     _client!, MbQuote(context.Name), ct),
+        };
 
-        // EnrichOneAsync checks result.ExternalId — pick the best match (first/highest-scored)
-        // and return it directly so the enrichment service can record it.
-        // Preserve Results list so UI search previews still work.
-        var best = container.Results?.FirstOrDefault();
-        if (best is null) return container; // no results → ExternalId stays null → NotFound
-        best.Results     = container.Results;
-        best.TotalResults = container.TotalResults;
-        return best;
+        return (container.Results ?? [])
+            .Select(r => ScoreCandidate(context, r))
+            .Where(c => c.Metadata.ExternalId is not null)
+            .OrderByDescending(c => c.Score)
+            .Take(10)
+            .ToList();
     }
+
+    private static string BuildAlbumQuery(MediaSearchContext ctx)
+    {
+        var name = StripYearSuffix(ctx.Name);
+        var artistClause = ctx.ParentName is not null
+            ? $" AND artist:{MbQuote(ctx.ParentName)}" : string.Empty;
+        return $"{MbQuote(name)}{artistClause}";
+    }
+
+    private static string BuildTrackQuery(MediaSearchContext ctx)
+    {
+        var artistClause  = ctx.GrandparentName is not null
+            ? $" AND artist:{MbQuote(ctx.GrandparentName)}" : string.Empty;
+        var releaseClause = ctx.ParentName is not null
+            ? $" AND release:{MbQuote(StripYearSuffix(ctx.ParentName))}" : string.Empty;
+        return $"{MbQuote(ctx.Name)}{artistClause}{releaseClause}";
+    }
+
+    /// <summary>Quotes a Lucene term if it contains whitespace.</summary>
+    private static string MbQuote(string s) =>
+        s.Contains(' ') ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
+
+    private static string StripYearSuffix(string name)
+    {
+        var m = YearSuffixRe.Match(name);
+        return m.Success ? name[..m.Index].Trim() : name;
+    }
+
+    private static ScoredCandidate ScoreCandidate(MediaSearchContext ctx, MediaMetadata candidate)
+    {
+        int score = 0;
+        var reasons = new List<string>();
+
+        var cn = Normalize(candidate.Title ?? string.Empty);
+        var qn = Normalize(ctx.Name);
+
+        if (string.Equals(cn, qn, StringComparison.Ordinal))
+        {
+            score += 60;
+            reasons.Add("title exact");
+        }
+        else if (cn.Contains(qn, StringComparison.Ordinal) || qn.Contains(cn, StringComparison.Ordinal))
+        {
+            score += 30;
+            reasons.Add("title contains");
+        }
+
+        if (ctx.Year.HasValue && candidate.Year.HasValue)
+        {
+            if (ctx.Year.Value == candidate.Year.Value)
+            {
+                score += 20;
+                reasons.Add("year exact");
+            }
+            else if (Math.Abs(ctx.Year.Value - candidate.Year.Value) == 1)
+            {
+                score += 10;
+                reasons.Add("year ±1");
+            }
+        }
+
+        return new ScoredCandidate(candidate, score,
+            reasons.Count > 0 ? string.Join(", ", reasons) : "no signals");
+    }
+
+    private static string Normalize(string s) =>
+        System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"[:\-,\.']", " ")
+            .Replace("  ", " ").Trim().ToLowerInvariant();
 
     // ── IMetadataProvider: get by ID ──────────────────────────────────────────
 
