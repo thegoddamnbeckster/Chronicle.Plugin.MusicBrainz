@@ -147,10 +147,27 @@ internal static class MusicBrainzEntityFetcher
             if (full is not null) releases.Add(MapRelease(full));
         }
 
-        // All cover art images from the Cover Art Archive
+        // Cover art: try release-group level first (preferred, single canonical image set).
+        // Many singles and EPs have art uploaded per-release but not at the release-group level;
+        // fall back to the first few individual releases when the release-group has no images.
         var images         = await CoverArtArchiveClient.GetImagesAsync(client, "release-group", mbid, ct);
         var frontImage     = images.FirstOrDefault(i => i.Front)?.Image ?? images.FirstOrDefault()?.Image;
         var backImage      = images.FirstOrDefault(i => i.Back && !i.Front)?.Image;
+
+        if (frontImage is null)
+        {
+            foreach (var release in (rg.Releases ?? []).Take(5))
+            {
+                if (release.Id is null) continue;
+                var rImages = await CoverArtArchiveClient.GetImagesAsync(client, "release", release.Id, ct);
+                if (rImages.Count == 0) continue;
+                images.AddRange(rImages);
+                frontImage ??= rImages.FirstOrDefault(i => i.Front)?.Image ?? rImages.FirstOrDefault()?.Image;
+                backImage  ??= rImages.FirstOrDefault(i => i.Back && !i.Front)?.Image;
+                if (frontImage is not null) break;
+            }
+        }
+
         var additionalImages = BuildAdditionalImages(images);
 
         // Cast: credited artist names

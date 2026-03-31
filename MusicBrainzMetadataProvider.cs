@@ -122,6 +122,11 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         new(@"\s*\((\d{4})\)\s*$",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    // Matches a leading "(YYYY) " year prefix — file scanners often store names this way.
+    private static readonly System.Text.RegularExpressions.Regex YearPrefixRe =
+        new(@"^\s*\(\d{4}\)\s*",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public async Task<IReadOnlyList<ScoredCandidate>> SearchAsync(
         MediaSearchContext context, CancellationToken ct = default)
     {
@@ -165,14 +170,24 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         return $"{MbQuote(ctx.Name)}{artistClause}{releaseClause}";
     }
 
-    /// <summary>Quotes a Lucene term if it contains whitespace.</summary>
-    private static string MbQuote(string s) =>
-        s.Contains(' ') ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
+    /// <summary>
+    /// Strips Lucene range/special operators then quotes if the term contains whitespace.
+    /// Operators like &lt;&gt;{}[]^~ break MusicBrainz SOLR if unescaped in the query string.
+    /// </summary>
+    private static string MbQuote(string s)
+    {
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"[<>{}[\]^~]", "").Trim();
+        return s.Contains(' ') ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
+    }
 
     private static string StripYearSuffix(string name)
     {
+        // Strip trailing "(YYYY)" — e.g. "The Better Life (2000)" → "The Better Life"
         var m = YearSuffixRe.Match(name);
-        return m.Success ? name[..m.Index].Trim() : name;
+        if (m.Success) name = name[..m.Index].Trim();
+        // Strip leading "(YYYY) " — e.g. "(2001) Duck and Run" → "Duck and Run"
+        name = YearPrefixRe.Replace(name, string.Empty).Trim();
+        return name;
     }
 
     private static ScoredCandidate ScoreCandidate(MediaSearchContext ctx, MediaMetadata candidate)
