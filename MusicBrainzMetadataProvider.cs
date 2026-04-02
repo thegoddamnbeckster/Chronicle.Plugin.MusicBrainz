@@ -147,7 +147,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
         return (container.Results ?? [])
             .Select(r => ScoreCandidate(context, r))
-            .Where(c => c.Metadata.ExternalId is not null)
+            .Where(c => !string.IsNullOrEmpty(c.Metadata.ExternalId))
             .OrderByDescending(c => c.Score)
             .Take(10)
             .ToList();
@@ -196,7 +196,9 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         var reasons = new List<string>();
 
         var cn = Normalize(candidate.Title ?? string.Empty);
-        var qn = Normalize(ctx.Name);
+        // Strip year prefix/suffix before comparing: "(1958) The Blues" → "The Blues"
+        // so folder-named albums with year prefixes get exact-match scores, not "contains".
+        var qn = Normalize(StripYearSuffix(ctx.Name));
 
         if (string.Equals(cn, qn, StringComparison.Ordinal))
         {
