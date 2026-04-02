@@ -127,13 +127,6 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         new(@"^\s*\(\d{4}\)\s*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    // Matches trailing version qualifiers common in file tags but absent from MusicBrainz recording
-    // titles — e.g. "(LP version)", "(Radio Edit)", "(Remastered)", "(Live)", "(Acoustic)".
-    private static readonly System.Text.RegularExpressions.Regex VersionQualifierRe =
-        new(@"\s*\((?:[^)]*\b(?:version|edit|mix|remix|lp|live|acoustic|demo|instrumental|reprise|remaster(?:ed)?|stereo|mono|explicit|clean|extended|alternate|original)\b[^)]*)\)\s*$",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
-            System.Text.RegularExpressions.RegexOptions.Compiled);
-
     public async Task<IReadOnlyList<ScoredCandidate>> SearchAsync(
         MediaSearchContext context, CancellationToken ct = default)
     {
@@ -143,15 +136,30 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
         if (context.HierarchyLevel == 2)
         {
-            // Tracks: try with release constraint first (more precise); if MusicBrainz returns
-            // nothing — common for B-sides stored in a different release than their parent folder —
-            // retry without the release clause so we can still find the recording.
+            // Tracks: three-stage cascade so that problematic tag values don't permanently
+            // block a match.
+            //
+            // Stage 1 — tag title + artist + release (most precise, honors the tag as-is)
             container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                _client!, BuildTrackQuery(context, includeRelease: true), ct);
+                _client!, BuildTrackQuery(context.Name, context, includeRelease: true), ct);
 
-            if (!(container.Results?.Count > 0))
+            // Stage 2 — filename stem + artist + release
+            // Handles cases where the tag title has a qualifier MusicBrainz doesn't store
+            // (e.g. tag="Duck and Run (LP version)", filename stem="Duck and Run").
+            if (!(container.Results?.Count > 0) && !string.IsNullOrEmpty(context.FilenameStem))
                 container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                    _client!, BuildTrackQuery(context, includeRelease: false), ct);
+                    _client!, BuildTrackQuery(context.FilenameStem, context, includeRelease: true), ct);
+
+            // Stage 3 — best available name, no release constraint
+            // Handles B-sides whose parent folder name doesn't match the MusicBrainz release
+            // they actually appear on.
+            if (!(container.Results?.Count > 0))
+            {
+                var bestName = !string.IsNullOrEmpty(context.FilenameStem)
+                    ? context.FilenameStem : context.Name;
+                container = await MusicBrainzSearcher.SearchRecordingsAsync(
+                    _client!, BuildTrackQuery(bestName, context, includeRelease: false), ct);
+            }
         }
         else
         {
@@ -182,20 +190,19 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         return $"{MbQuote(name)}{artistClause}";
     }
 
-    private static string BuildTrackQuery(MediaSearchContext ctx, bool includeRelease = true)
+    /// <summary>
+    /// Builds a recording Lucene query with an explicit <paramref name="trackName"/>.
+    /// Keeping the name separate from context lets the caller cascade through
+    /// tag title → filename stem without duplicating the artist/release clause logic.
+    /// </summary>
+    private static string BuildTrackQuery(string trackName, MediaSearchContext ctx, bool includeRelease)
     {
-        // Strip version qualifiers that appear in file tags but not in MusicBrainz recording
-        // titles: "(LP version)" → "", "(Radio Edit)" → "", etc.
-        var trackName     = StripVersionQualifiers(StripYearSuffix(ctx.Name));
         var artistClause  = ctx.GrandparentName is not null
             ? $" AND artist:{MbQuote(ctx.GrandparentName)}" : string.Empty;
         var releaseClause = includeRelease && ctx.ParentName is not null
             ? $" AND release:{MbQuote(StripYearSuffix(ctx.ParentName))}" : string.Empty;
         return $"{MbQuote(trackName)}{artistClause}{releaseClause}";
     }
-
-    private static string StripVersionQualifiers(string name)
-        => VersionQualifierRe.Replace(name, string.Empty).Trim();
 
     /// <summary>
     /// Strips Lucene range/special operators then quotes if the term contains whitespace.
@@ -223,10 +230,18 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         var reasons = new List<string>();
 
         var cn = Normalize(candidate.Title ?? string.Empty);
-        // Strip year prefix/suffix and version qualifiers before comparing so that
-        // "(1958) The Blues" → "The Blues" and "Duck and Run (LP version)" → "Duck and Run"
-        // both get exact-match scores rather than falling through to "contains".
-        var qn = Normalize(StripVersionQualifiers(StripYearSuffix(ctx.Name)));
+        // Strip year prefix/suffix before comparing: "(1958) The Blues" → "The Blues"
+        // so folder-named albums with year prefixes get exact-match scores, not "contains".
+        var qn = Normalize(StripYearSuffix(ctx.Name));
+        // If a filename stem is available and is an exact match where the tag title isn't,
+        // prefer it — ensures Stage 2 (filename-fallback) results still score as exact matches.
+        if (!string.IsNullOrEmpty(ctx.FilenameStem))
+        {
+            var qnStem = Normalize(ctx.FilenameStem);
+            if (string.Equals(cn, qnStem, StringComparison.Ordinal)
+                && !string.Equals(cn, qn, StringComparison.Ordinal))
+                qn = qnStem;
+        }
 
         if (string.Equals(cn, qn, StringComparison.Ordinal))
         {
