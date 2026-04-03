@@ -14,6 +14,15 @@
     <ProjectReference Include="..\Chronicle\src\Chronicle.Plugins\Chronicle.Plugins.csproj"
                       Private="false"
                       ExcludeAssets="runtime" />
+    <!-- Chronicle.Core is a transitive dep of Chronicle.Plugins. Without this explicit
+         Private="false" reference, MSBuild copies Chronicle.Core.dll into the plugin
+         output dir and the deps.json lists it — causing PluginLoadContext to load the
+         plugin-dir copy instead of falling through to the host's (current) version.
+         Marking it Private="false" here removes it from both outputs so the host's
+         copy is always used. -->
+    <ProjectReference Include="..\Chronicle\src\Chronicle.Core\Chronicle.Core.csproj"
+                      Private="false"
+                      ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>
