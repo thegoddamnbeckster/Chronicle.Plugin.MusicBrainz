@@ -221,6 +221,43 @@ public class MusicBrainzProviderTests
             $"Expected score ≥60 (exact match via FilenameStem), got {results[0].Score}");
     }
 
+    // ── Track cascade: Stage 4 (strip version qualifier) ─────────────────────
+
+    [Fact]
+    public async Task SearchAsync_Track_VersionQualifierStripped_WhenAllEarlierStagesEmpty()
+    {
+        // Stages 1–3 all return empty because MusicBrainz phrase-search fails to match
+        // "Kryptonite (LP version)" (parentheses confuse the Lucene parser).
+        // Stage 4 strips the trailing parenthetical and retries with the bare title.
+        var queriesReceived = new List<string>();
+        var provider = BuildProvider(url =>
+        {
+            var qs = Uri.UnescapeDataString(new Uri("https://mb.test/" + url).Query);
+            queriesReceived.Add(qs);
+            // Only the bare-title query (no "(LP version)") returns a hit
+            return qs.Contains("LP version")
+                ? Ok(EmptyRecordings)
+                : Ok(OneRecording("rec-kryptonite", "Kryptonite (LP version)"));
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "Kryptonite (LP version)",
+            HierarchyLevel: 2,
+            GrandparentName: "3 Doors Down",
+            ParentName:     "Kryptonite"); // no FilenameStem — stem == name
+
+        var results = await provider.SearchAsync(ctx);
+
+        Assert.Single(results);
+        Assert.Equal("recording:rec-kryptonite", results[0].Metadata.ExternalId);
+        // Stage 1 (with release) + Stage 3 (no release, still has LP version) + Stage 4 (bare title)
+        Assert.Equal(3, queriesReceived.Count);
+        // Stage 4 query must NOT contain "LP version"
+        Assert.DoesNotContain("LP version", queriesReceived[2]);
+        // And must still contain the bare title
+        Assert.Contains("Kryptonite", queriesReceived[2]);
+    }
+
     // ── Artist search at root level ───────────────────────────────────────────
 
     [Fact]

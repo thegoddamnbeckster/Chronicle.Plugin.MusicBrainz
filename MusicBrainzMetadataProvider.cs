@@ -134,6 +134,14 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         new(@"^\s*\(\d{4}\)\s*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    // Matches a trailing version/edition qualifier in parentheses, e.g. "(LP version)",
+    // "(radio edit)", "(acoustic)", "(remastered)". Used to strip the qualifier before
+    // Stage 4 search so that MusicBrainz can find recordings whose phrases with parens
+    // fail to match in Lucene.
+    private static readonly System.Text.RegularExpressions.Regex VersionQualifierRe =
+        new(@"\s*\([^)]+\)\s*$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
     public async Task<IReadOnlyList<ScoredCandidate>> SearchAsync(
         MediaSearchContext context, CancellationToken ct = default)
     {
@@ -166,6 +174,25 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
                     ? context.FilenameStem : context.Name;
                 container = await MusicBrainzSearcher.SearchRecordingsAsync(
                     _client!, BuildTrackQuery(bestName, context, includeRelease: false), ct);
+            }
+
+            // Stage 4 — strip trailing version qualifier, no release constraint
+            // Handles tracks whose tag title or filename has a version qualifier in parentheses
+            // (e.g. "Kryptonite (LP version)", "Smack (LP version)") that MusicBrainz's Lucene
+            // fails to phrase-match even though the recording exists. Stripping the qualifier
+            // and searching the bare title finds the candidates; scoring still picks the best
+            // match because Normalize() strips punctuation so "(LP version)" compares equal.
+            if (!(container.Results?.Count > 0))
+            {
+                var stage3Name = !string.IsNullOrEmpty(context.FilenameStem)
+                    ? context.FilenameStem : context.Name;
+                var strippedName = VersionQualifierRe.Replace(stage3Name, string.Empty).Trim();
+                if (!string.IsNullOrEmpty(strippedName) &&
+                    !string.Equals(strippedName, stage3Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    container = await MusicBrainzSearcher.SearchRecordingsAsync(
+                        _client!, BuildTrackQuery(strippedName, context, includeRelease: false), ct);
+                }
             }
         }
         else
