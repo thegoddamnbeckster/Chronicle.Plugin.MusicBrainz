@@ -28,6 +28,9 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     private MusicBrainzClient? _client;
 
+    /// <summary>Test-only: inject a pre-configured client instead of going through Configure().</summary>
+    internal MusicBrainzMetadataProvider(MusicBrainzClient client) => _client = client;
+
     // ── IMetadataProvider: static declarations ────────────────────────────────
 
     public MediaTypeSupport[] GetSupportedMediaTypes() =>
