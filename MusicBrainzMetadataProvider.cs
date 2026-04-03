@@ -28,6 +28,10 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     private MusicBrainzClient? _client;
 
+    /// <summary>Production: Chronicle instantiates plugins via <c>Activator.CreateInstance</c>, so a
+    /// public parameterless constructor is required. Configuration is applied via <see cref="Configure"/>.</summary>
+    public MusicBrainzMetadataProvider() { }
+
     /// <summary>Test-only: inject a pre-configured client instead of going through Configure().</summary>
     internal MusicBrainzMetadataProvider(MusicBrainzClient client) => _client = client;
 
