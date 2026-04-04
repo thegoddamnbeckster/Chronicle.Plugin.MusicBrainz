@@ -243,17 +243,48 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
                 }
             }
         }
+        else if (context.HierarchyLevel == 0)
+        {
+            // Artist: single query — name only.
+            container = await MusicBrainzSearcher.SearchArtistsAsync(
+                _client!, MbQuote(context.Name), ct);
+        }
+        else if (context.HierarchyLevel == 1)
+        {
+            // Album: three-stage cascade so special names (e.g. "<shutdown.exe>") and
+            // folder-prefixed names (e.g. "(2000) The Better Life") are still found.
+            //
+            // Stage 1 — year-stripped name + artist (most precise)
+            container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                _client!, BuildAlbumQuery(context), ct);
+
+            // Stage 2 — year-stripped name only, no artist constraint
+            // Handles mismatched artist names (e.g. capitalisation variants, features).
+            if (!(container.Results?.Count > 0))
+                container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                    _client!, MbQuote(StripYearSuffix(context.Name)), ct);
+
+            // Stage 3 — raw name (no year strip, no normalisation) + artist
+            // Last resort: use the exact stored name as a phrase in case StripYearSuffix
+            // changed a meaningful part of the title.
+            if (!(container.Results?.Count > 0))
+            {
+                var rawQuoted = MbQuote(context.Name);
+                var stage1Quoted = MbQuote(StripYearSuffix(context.Name));
+                // Only bother if the raw form is actually different from Stage 1/2
+                if (!string.Equals(rawQuoted, stage1Quoted, StringComparison.Ordinal))
+                {
+                    var artistClause = context.ParentName is not null
+                        ? $" AND artist:{MbQuote(context.ParentName)}" : string.Empty;
+                    container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                        _client!, $"{rawQuoted}{artistClause}", ct);
+                }
+            }
+        }
         else
         {
-            container = context.HierarchyLevel switch
-            {
-                0 => await MusicBrainzSearcher.SearchArtistsAsync(
-                         _client!, MbQuote(context.Name), ct),
-                1 => await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                         _client!, BuildAlbumQuery(context), ct),
-                _ => await MusicBrainzSearcher.SearchArtistsAsync(
-                         _client!, MbQuote(context.Name), ct),
-            };
+            container = await MusicBrainzSearcher.SearchArtistsAsync(
+                _client!, MbQuote(context.Name), ct);
         }
 
         return (container.Results ?? [])
@@ -287,13 +318,23 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     }
 
     /// <summary>
-    /// Strips Lucene range/special operators then quotes if the term contains whitespace.
-    /// Operators like &lt;&gt;{}[]^~ break MusicBrainz SOLR if unescaped in the query string.
+    /// Strips Lucene range/special operators then quotes as a phrase whenever the term
+    /// contains whitespace or non-alphanumeric punctuation.
+    /// Examples: "shutdown.exe" → <c>"shutdown.exe"</c> (dot forces phrase quote so SOLR
+    /// doesn't tokenise on it); "Duck and Run (LP version)" → <c>"Duck and Run (LP version)"</c>
+    /// (parentheses are legal inside phrase quotes and preserve the full title).
+    /// Chars stripped entirely: &lt;&gt;{}[]^~ — these are invalid even inside phrases.
     /// </summary>
     private static string MbQuote(string s)
     {
+        // Strip chars that are always invalid even inside Lucene phrase quotes.
         s = System.Text.RegularExpressions.Regex.Replace(s, @"[<>{}[\]^~]", "").Trim();
-        return s.Contains(' ') ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
+        // Quote as a phrase whenever the term contains a space OR any punctuation that
+        // Lucene would mis-parse as an operator (parentheses, dots, colons, etc.).
+        // Parentheses are NOT stripped — inside a quoted phrase they are literals and
+        // preserve the full title (e.g. "Duck and Run (LP version)").
+        var needsQuotes = s.Any(c => c == ' ' || (!char.IsLetterOrDigit(c) && c != '-'));
+        return needsQuotes ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
     }
 
     private static string StripYearSuffix(string name)
