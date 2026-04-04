@@ -59,6 +59,26 @@ internal static class MusicBrainzSearcher
         return new MediaMetadata { Results = items, TotalResults = result?.Count ?? 0 };
     }
 
+    /// <summary>
+    /// Searches recordings with <c>inc=releases</c> and returns the (releaseId, releaseTitle)
+    /// pairs found in the results. Used by Stage 5 to discover the specific release MBID
+    /// for a sibling track, which is then used as a <c>reid:</c> constraint.
+    /// </summary>
+    public static async Task<IReadOnlyList<(string ReleaseId, string ReleaseTitle)>>
+        FindReleasesForSiblingAsync(MusicBrainzClient client, string query, CancellationToken ct)
+    {
+        var encoded = Uri.EscapeDataString(query);
+        var json = await client.GetAsync(
+            $"recording?query={encoded}&limit=5&inc=releases&fmt=json", ct);
+        var result = JsonSerializer.Deserialize<MbSearchResult<MbRecording>>(json, MusicBrainzJsonOptions.Opts);
+        var pairs = new List<(string, string)>();
+        foreach (var rec in result?.Recordings ?? [])
+            foreach (var rel in rec.Releases ?? [])
+                if (rel.Id is not null && rel.Title is not null)
+                    pairs.Add((rel.Id, rel.Title));
+        return pairs;
+    }
+
     private static string? BuildArtistSummary(MbArtist a)
     {
         var parts = new List<string>();

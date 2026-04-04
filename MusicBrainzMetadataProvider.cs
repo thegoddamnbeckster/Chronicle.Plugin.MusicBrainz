@@ -151,8 +151,8 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
         if (context.HierarchyLevel == 2)
         {
-            // Tracks: three-stage cascade so that problematic tag values don't permanently
-            // block a match.
+            // Tracks: five-stage cascade so that problematic tag values and ambiguous titles
+            // don't permanently block a match.
             //
             // Stage 1 — tag title + artist + release (most precise, honors the tag as-is)
             container = await MusicBrainzSearcher.SearchRecordingsAsync(
@@ -176,12 +176,60 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
                     _client!, BuildTrackQuery(bestName, context, includeRelease: false), ct);
             }
 
-            // Stage 4 — strip trailing version qualifier, no release constraint
-            // Handles tracks whose tag title or filename has a version qualifier in parentheses
-            // (e.g. "Kryptonite (LP version)", "Smack (LP version)") that MusicBrainz's Lucene
-            // fails to phrase-match even though the recording exists. Stripping the qualifier
-            // and searching the bare title finds the candidates; scoring still picks the best
-            // match because Normalize() strips punctuation so "(LP version)" compares equal.
+            // Stage 4 — sibling-based release pinning (reid: constraint)
+            // When all previous stages fail and sibling names are available, search for a sibling
+            // track using inc=releases to discover the specific MusicBrainz release MBID, then
+            // search the current track with that MBID as a reid: constraint. This is the most
+            // precise possible search: it identifies the exact release (not just the title) and
+            // avoids false matches from other releases with similar track titles.
+            if (!(container.Results?.Count > 0)
+                && context.SiblingNames?.Count > 0
+                && context.GrandparentName is not null)
+            {
+                var releaseName = context.ParentName is not null
+                    ? StripYearSuffix(context.ParentName) : null;
+                var stage3Name = !string.IsNullOrEmpty(context.FilenameStem)
+                    ? context.FilenameStem : context.Name;
+                var currentBare = VersionQualifierRe.Replace(stage3Name, string.Empty).Trim();
+                if (string.IsNullOrEmpty(currentBare)) currentBare = context.Name;
+
+                foreach (var sibling in context.SiblingNames.Take(2))
+                {
+                    var siblingBare = VersionQualifierRe.Replace(sibling, string.Empty).Trim();
+                    if (string.IsNullOrEmpty(siblingBare)) continue;
+
+                    var siblingQuery = BuildTrackQuery(siblingBare, context, includeRelease: false);
+                    var releases = await MusicBrainzSearcher.FindReleasesForSiblingAsync(
+                        _client!, siblingQuery, ct);
+
+                    // Prefer a release whose title matches our parent (folder/album) name
+                    string? matchedReleaseId = null;
+                    if (releaseName is not null)
+                        matchedReleaseId = releases
+                            .FirstOrDefault(r => string.Equals(
+                                Normalize(r.ReleaseTitle), Normalize(releaseName),
+                                StringComparison.Ordinal))
+                            .ReleaseId;
+                    // Fall back to the first release returned
+                    matchedReleaseId ??= releases.FirstOrDefault().ReleaseId;
+
+                    if (matchedReleaseId is null) continue;
+
+                    var reidQuery =
+                        $"{MbQuote(currentBare)} AND reid:{matchedReleaseId}" +
+                        $" AND artist:{MbQuote(context.GrandparentName)}";
+                    container = await MusicBrainzSearcher.SearchRecordingsAsync(
+                        _client!, reidQuery, ct);
+                    if (container.Results?.Count > 0) break;
+                }
+            }
+
+            // Stage 5 — strip trailing version qualifier, no release constraint
+            // Last resort: if even sibling-based pinning failed (or no siblings exist), strip the
+            // version qualifier (e.g. "Kryptonite (LP version)" → "Kryptonite") and do a broad
+            // artist search. Scoring still picks the correct recording because Normalize() strips
+            // punctuation so "(LP version)" in the candidate title still compares equal to the
+            // ctx.Name "(LP version)".
             if (!(container.Results?.Count > 0))
             {
                 var stage3Name = !string.IsNullOrEmpty(context.FilenameStem)

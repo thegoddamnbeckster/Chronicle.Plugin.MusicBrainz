@@ -221,14 +221,14 @@ public class MusicBrainzProviderTests
             $"Expected score ≥60 (exact match via FilenameStem), got {results[0].Score}");
     }
 
-    // ── Track cascade: Stage 4 (strip version qualifier) ─────────────────────
+    // ── Track cascade: Stage 5 (strip version qualifier) ─────────────────────
 
     [Fact]
     public async Task SearchAsync_Track_VersionQualifierStripped_WhenAllEarlierStagesEmpty()
     {
-        // Stages 1–3 all return empty because MusicBrainz phrase-search fails to match
-        // "Kryptonite (LP version)" (parentheses confuse the Lucene parser).
-        // Stage 4 strips the trailing parenthetical and retries with the bare title.
+        // Stages 1–4 all return empty (no siblings in this ctx → Stage 4 skipped; Lucene
+        // phrase-match fails for "(LP version)" parentheses in Stages 1–3).
+        // Stage 5 strips the trailing parenthetical and retries with the bare title.
         var queriesReceived = new List<string>();
         var provider = BuildProvider(url =>
         {
@@ -250,9 +250,10 @@ public class MusicBrainzProviderTests
 
         Assert.Single(results);
         Assert.Equal("recording:rec-kryptonite", results[0].Metadata.ExternalId);
-        // Stage 1 (with release) + Stage 3 (no release, still has LP version) + Stage 4 (bare title)
+        // Stage 1 (with release) + Stage 3 (no release, still has LP version) + Stage 5 (bare title)
+        // Stage 4 (sibling reid:) is skipped because ctx has no SiblingNames.
         Assert.Equal(3, queriesReceived.Count);
-        // Stage 4 query must NOT contain "LP version"
+        // Stage 5 query must NOT contain "LP version"
         Assert.DoesNotContain("LP version", queriesReceived[2]);
         // And must still contain the bare title
         Assert.Contains("Kryptonite", queriesReceived[2]);
