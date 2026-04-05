@@ -134,158 +134,19 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         new(@"^\s*\(\d{4}\)\s*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    // Matches a trailing version/edition qualifier in parentheses, e.g. "(LP version)",
-    // "(radio edit)", "(acoustic)", "(remastered)". Used to strip the qualifier before
-    // Stage 4 search so that MusicBrainz can find recordings whose phrases with parens
-    // fail to match in Lucene.
-    private static readonly System.Text.RegularExpressions.Regex VersionQualifierRe =
-        new(@"\s*\([^)]+\)\s*$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
-
     public async Task<IReadOnlyList<ScoredCandidate>> SearchAsync(
         MediaSearchContext context, CancellationToken ct = default)
     {
         EnsureConfigured();
 
-        MediaMetadata container;
+        // Use AltTitles when provided (populated by Chronicle from tag, stem, version-stripped
+        // forms); fall back to Name so the plugin works even with older Chronicle versions.
+        var titles = context.AltTitles?.Count > 0
+            ? context.AltTitles
+            : (IReadOnlyList<string>)[context.Name];
 
-        if (context.HierarchyLevel == 2)
-        {
-            // Tracks: five-stage cascade so that problematic tag values and ambiguous titles
-            // don't permanently block a match.
-            //
-            // Stage 1 — tag title + artist + release (most precise, honors the tag as-is)
-            container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                _client!, BuildTrackQuery(context.Name, context, includeRelease: true), ct);
-
-            // Stage 2 — filename stem + artist + release
-            // Handles cases where the tag title has a qualifier MusicBrainz doesn't store
-            // (e.g. tag="Duck and Run (LP version)", filename stem="Duck and Run").
-            if (!(container.Results?.Count > 0) && !string.IsNullOrEmpty(context.FilenameStem))
-                container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                    _client!, BuildTrackQuery(context.FilenameStem, context, includeRelease: true), ct);
-
-            // Stage 3 — best available name, no release constraint
-            // Handles B-sides whose parent folder name doesn't match the MusicBrainz release
-            // they actually appear on.
-            if (!(container.Results?.Count > 0))
-            {
-                var bestName = !string.IsNullOrEmpty(context.FilenameStem)
-                    ? context.FilenameStem : context.Name;
-                container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                    _client!, BuildTrackQuery(bestName, context, includeRelease: false), ct);
-            }
-
-            // Stage 4 — sibling-based release pinning (reid: constraint)
-            // When all previous stages fail and sibling names are available, search for a sibling
-            // track using inc=releases to discover the specific MusicBrainz release MBID, then
-            // search the current track with that MBID as a reid: constraint. This is the most
-            // precise possible search: it identifies the exact release (not just the title) and
-            // avoids false matches from other releases with similar track titles.
-            if (!(container.Results?.Count > 0)
-                && context.SiblingNames?.Count > 0
-                && context.GrandparentName is not null)
-            {
-                var releaseName = context.ParentName is not null
-                    ? StripYearSuffix(context.ParentName) : null;
-                var stage3Name = !string.IsNullOrEmpty(context.FilenameStem)
-                    ? context.FilenameStem : context.Name;
-                var currentBare = VersionQualifierRe.Replace(stage3Name, string.Empty).Trim();
-                if (string.IsNullOrEmpty(currentBare)) currentBare = context.Name;
-
-                foreach (var sibling in context.SiblingNames.Take(2))
-                {
-                    var siblingBare = VersionQualifierRe.Replace(sibling, string.Empty).Trim();
-                    if (string.IsNullOrEmpty(siblingBare)) continue;
-
-                    var siblingQuery = BuildTrackQuery(siblingBare, context, includeRelease: false);
-                    var releases = await MusicBrainzSearcher.FindReleasesForSiblingAsync(
-                        _client!, siblingQuery, ct);
-
-                    // Prefer a release whose title matches our parent (folder/album) name
-                    string? matchedReleaseId = null;
-                    if (releaseName is not null)
-                        matchedReleaseId = releases
-                            .FirstOrDefault(r => string.Equals(
-                                Normalize(r.ReleaseTitle), Normalize(releaseName),
-                                StringComparison.Ordinal))
-                            .ReleaseId;
-                    // Fall back to the first release returned
-                    matchedReleaseId ??= releases.FirstOrDefault().ReleaseId;
-
-                    if (matchedReleaseId is null) continue;
-
-                    var reidQuery =
-                        $"{MbQuote(currentBare)} AND reid:{matchedReleaseId}" +
-                        $" AND artist:{MbQuote(context.GrandparentName)}";
-                    container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                        _client!, reidQuery, ct);
-                    if (container.Results?.Count > 0) break;
-                }
-            }
-
-            // Stage 5 — strip trailing version qualifier, no release constraint
-            // Last resort: if even sibling-based pinning failed (or no siblings exist), strip the
-            // version qualifier (e.g. "Kryptonite (LP version)" → "Kryptonite") and do a broad
-            // artist search. Scoring still picks the correct recording because Normalize() strips
-            // punctuation so "(LP version)" in the candidate title still compares equal to the
-            // ctx.Name "(LP version)".
-            if (!(container.Results?.Count > 0))
-            {
-                var stage3Name = !string.IsNullOrEmpty(context.FilenameStem)
-                    ? context.FilenameStem : context.Name;
-                var strippedName = VersionQualifierRe.Replace(stage3Name, string.Empty).Trim();
-                if (!string.IsNullOrEmpty(strippedName) &&
-                    !string.Equals(strippedName, stage3Name, StringComparison.OrdinalIgnoreCase))
-                {
-                    container = await MusicBrainzSearcher.SearchRecordingsAsync(
-                        _client!, BuildTrackQuery(strippedName, context, includeRelease: false), ct);
-                }
-            }
-        }
-        else if (context.HierarchyLevel == 0)
-        {
-            // Artist: single query — name only.
-            container = await MusicBrainzSearcher.SearchArtistsAsync(
-                _client!, MbQuote(context.Name), ct);
-        }
-        else if (context.HierarchyLevel == 1)
-        {
-            // Album: three-stage cascade so special names (e.g. "<shutdown.exe>") and
-            // folder-prefixed names (e.g. "(2000) The Better Life") are still found.
-            //
-            // Stage 1 — year-stripped name + artist (most precise)
-            container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                _client!, BuildAlbumQuery(context), ct);
-
-            // Stage 2 — year-stripped name only, no artist constraint
-            // Handles mismatched artist names (e.g. capitalisation variants, features).
-            if (!(container.Results?.Count > 0))
-                container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                    _client!, MbQuote(StripYearSuffix(context.Name)), ct);
-
-            // Stage 3 — raw name (no year strip, no normalisation) + artist
-            // Last resort: use the exact stored name as a phrase in case StripYearSuffix
-            // changed a meaningful part of the title.
-            if (!(container.Results?.Count > 0))
-            {
-                var rawQuoted = MbQuote(context.Name);
-                var stage1Quoted = MbQuote(StripYearSuffix(context.Name));
-                // Only bother if the raw form is actually different from Stage 1/2
-                if (!string.Equals(rawQuoted, stage1Quoted, StringComparison.Ordinal))
-                {
-                    var artistClause = context.ParentName is not null
-                        ? $" AND artist:{MbQuote(context.ParentName)}" : string.Empty;
-                    container = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                        _client!, $"{rawQuoted}{artistClause}", ct);
-                }
-            }
-        }
-        else
-        {
-            container = await MusicBrainzSearcher.SearchArtistsAsync(
-                _client!, MbQuote(context.Name), ct);
-        }
+        var year      = context.Year;
+        var container = await RunCascadeAsync(context, titles, year, ct);
 
         return (container.Results ?? [])
             .Select(r => ScoreCandidate(context, r))
@@ -295,26 +156,111 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             .ToList();
     }
 
-    private static string BuildAlbumQuery(MediaSearchContext ctx)
+    /// <summary>
+    /// Runs the four-attempt Stages 1+2 cascade:
+    ///   1a. Exact + year  (all alt-titles)
+    ///   1b. Exact, no year (all alt-titles)
+    ///   2a. Fuzzy + year  (all alt-titles)
+    ///   2b. Fuzzy, no year (all alt-titles)
+    /// Stages 3 and 4 (sub-item comparison) will be appended in later tasks.
+    /// </summary>
+    private async Task<MediaMetadata> RunCascadeAsync(
+        MediaSearchContext context,
+        IReadOnlyList<string> titles,
+        int? year,
+        CancellationToken ct)
     {
-        var name = StripYearSuffix(ctx.Name);
-        var artistClause = ctx.ParentName is not null
-            ? $" AND artist:{MbQuote(ctx.ParentName)}" : string.Empty;
-        return $"{MbQuote(name)}{artistClause}";
+        // Stage 1: exact title
+        if (year.HasValue)
+        {
+            var r = await TryEachTitleAsync(titles, year, exact: true, context, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        {
+            var r = await TryEachTitleAsync(titles, null, exact: true, context, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+
+        // Stage 2: fuzzy title
+        if (year.HasValue)
+        {
+            var r = await TryEachTitleAsync(titles, year, exact: false, context, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        {
+            var r = await TryEachTitleAsync(titles, null, exact: false, context, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+
+        return new MediaMetadata();
+    }
+
+    private async Task<MediaMetadata> TryEachTitleAsync(
+        IReadOnlyList<string> titles,
+        int? year,
+        bool exact,
+        MediaSearchContext context,
+        CancellationToken ct)
+    {
+        // Determine artist constraint based on hierarchy level
+        string? artist = context.HierarchyLevel switch
+        {
+            0 => null,                    // searching FOR an artist — no artist constraint
+            1 => context.ParentName,      // album: artist is the parent
+            _ => context.GrandparentName  // track: artist is the grandparent
+        };
+
+        foreach (var title in titles)
+        {
+            if (string.IsNullOrWhiteSpace(title)) continue;
+
+            var query = context.HierarchyLevel switch
+            {
+                0 => exact ? MbQuote(title) : MbSanitize(title),  // artist search — title only
+                1 => BuildReleaseGroupQuery(title, artist, year, exact),
+                _ => BuildRecordingQuery(title, artist, year, exact)
+            };
+
+            var result = context.HierarchyLevel switch
+            {
+                0 => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
+                1 => await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct),
+                _ => await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query, ct)
+            };
+
+            if (result.Results?.Count > 0) return result;
+        }
+        return new MediaMetadata();
     }
 
     /// <summary>
-    /// Builds a recording Lucene query with an explicit <paramref name="trackName"/>.
-    /// Keeping the name separate from context lets the caller cascade through
-    /// tag title → filename stem without duplicating the artist/release clause logic.
+    /// Builds a MusicBrainz recording (track) Lucene query.
+    /// For exact search the title is phrase-quoted via <see cref="MbQuote"/>;
+    /// for fuzzy search it is sanitised but unquoted via <see cref="MbSanitize"/>.
+    /// Year maps to the <c>date</c> field on recordings.
     /// </summary>
-    private static string BuildTrackQuery(string trackName, MediaSearchContext ctx, bool includeRelease)
+    private static string BuildRecordingQuery(
+        string title, string? artist, int? year, bool exact)
     {
-        var artistClause  = ctx.GrandparentName is not null
-            ? $" AND artist:{MbQuote(ctx.GrandparentName)}" : string.Empty;
-        var releaseClause = includeRelease && ctx.ParentName is not null
-            ? $" AND release:{MbQuote(StripYearSuffix(ctx.ParentName))}" : string.Empty;
-        return $"{MbQuote(trackName)}{artistClause}{releaseClause}";
+        var titlePart = exact ? MbQuote(title) : MbSanitize(title);
+        var parts = new List<string> { titlePart };
+        if (artist is not null)  parts.Add($"artist:{MbQuote(artist)}");
+        if (year   is not null)  parts.Add($"date:{year}");
+        return string.Join(" AND ", parts);
+    }
+
+    /// <summary>
+    /// Builds a MusicBrainz release-group (album) Lucene query.
+    /// Year maps to the <c>firstreleasedate</c> field on release-groups.
+    /// </summary>
+    private static string BuildReleaseGroupQuery(
+        string title, string? artist, int? year, bool exact)
+    {
+        var titlePart = exact ? MbQuote(title) : MbSanitize(title);
+        var parts = new List<string> { titlePart };
+        if (artist is not null)  parts.Add($"artist:{MbQuote(artist)}");
+        if (year   is not null)  parts.Add($"firstreleasedate:{year}");
+        return string.Join(" AND ", parts);
     }
 
     /// <summary>
@@ -335,6 +281,21 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         // preserve the full title (e.g. "Duck and Run (LP version)").
         var needsQuotes = s.Any(c => c == ' ' || (!char.IsLetterOrDigit(c) && c != '-'));
         return needsQuotes ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
+    }
+
+    /// <summary>
+    /// Strips Lucene special operators and returns the term unquoted, suitable for
+    /// fuzzy/tokenised matching (Stage 2). Unlike <see cref="MbQuote"/>, this does not
+    /// phrase-quote the result — Lucene will tokenise on spaces and apply standard
+    /// analysis, giving broader (fuzzier) matching than a phrase search.
+    /// </summary>
+    private static string MbSanitize(string s)
+    {
+        // Strip chars invalid in Lucene query strings
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"[<>{}[\]^~""\\]", "").Trim();
+        // Escape remaining Lucene special chars that must be escaped when unquoted
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"([+\-!():|\?*])", @"\$1");
+        return s;
     }
 
     private static string StripYearSuffix(string name)

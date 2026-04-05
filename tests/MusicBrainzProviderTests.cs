@@ -7,8 +7,8 @@ namespace Chronicle.Plugin.MusicBrainz.Tests;
 
 /// <summary>
 /// Unit tests for <see cref="MusicBrainzMetadataProvider.SearchAsync"/> —
-/// validates the three-stage track cascade, angle-bracket escaping, and scoring logic
-/// without making real HTTP calls.
+/// validates the four-attempt Stage 1+2 cascade (exact/fuzzy × year/no-year),
+/// angle-bracket escaping, and scoring logic without making real HTTP calls.
 /// </summary>
 public class MusicBrainzProviderTests
 {
@@ -36,12 +36,12 @@ public class MusicBrainzProviderTests
         return new MusicBrainzMetadataProvider(client);
     }
 
-    // ── Track cascade: Stage 1 succeeds ───────────────────────────────────────
+    // ── Stage 1 succeeds on first call ────────────────────────────────────────
 
     [Fact]
     public async Task SearchAsync_Track_Stage1Succeeds_ReturnsWithoutFallback()
     {
-        // Stage 1 query matches → provider must NOT call Stage 2 or 3.
+        // Stage 1 query matches → provider must NOT proceed to Stage 2.
         int callCount = 0;
         var provider = BuildProvider(url =>
         {
@@ -62,71 +62,10 @@ public class MusicBrainzProviderTests
 
         Assert.Single(results);
         Assert.Equal("recording:rec-1", results[0].Metadata.ExternalId);
-        Assert.Equal(1, callCount); // only Stage 1 called
+        Assert.Equal(1, callCount); // only Stage 1b (no year) called
     }
 
-    // ── Track cascade: Stage 2 (FilenameStem fallback) ───────────────────────
-
-    [Fact]
-    public async Task SearchAsync_Track_FilenameStemFallback_WhenStage1Empty()
-    {
-        // Stage 1 (tag title) returns nothing; Stage 2 (filename stem) should return a hit.
-        var queriesReceived = new List<string>();
-        var provider = BuildProvider(url =>
-        {
-            var qs = Uri.UnescapeDataString(new Uri("https://mb.test/" + url).Query);
-            queriesReceived.Add(qs);
-            // Stage 2 query contains "Duck and Run" without "(LP version)"
-            return qs.Contains("Duck and Run (LP version)")
-                ? Ok(EmptyRecordings)
-                : Ok(OneRecording("rec-stem", "Duck and Run"));
-        });
-
-        var ctx = new MediaSearchContext(
-            Name:           "Duck and Run (LP version)",
-            HierarchyLevel: 2,
-            GrandparentName: "3 Doors Down",
-            ParentName:     "Away From the Sun",
-            FilenameStem:   "Duck and Run");
-
-        var results = await provider.SearchAsync(ctx);
-
-        Assert.Single(results);
-        Assert.Equal("recording:rec-stem", results[0].Metadata.ExternalId);
-        Assert.Equal(2, queriesReceived.Count); // Stage 1 + Stage 2
-    }
-
-    // ── Track cascade: Stage 3 (no release constraint) ───────────────────────
-
-    [Fact]
-    public async Task SearchAsync_Track_NoReleaseConstraint_WhenStage1And2Empty()
-    {
-        // Stage 1 and 2 both return empty; Stage 3 drops the release clause.
-        var queriesReceived = new List<string>();
-        var provider = BuildProvider(url =>
-        {
-            var qs = Uri.UnescapeDataString(new Uri("https://mb.test/" + url).Query);
-            queriesReceived.Add(qs);
-            // Stage 3 has no "release:" in query
-            return qs.Contains("release:")
-                ? Ok(EmptyRecordings)
-                : Ok(OneRecording("rec-bside", "It's Not Me"));
-        });
-
-        var ctx = new MediaSearchContext(
-            Name:           "It's Not Me",
-            HierarchyLevel: 2,
-            GrandparentName: "3 Doors Down",
-            ParentName:     "Away From the Sun");  // no FilenameStem
-
-        var results = await provider.SearchAsync(ctx);
-
-        Assert.Single(results);
-        Assert.Equal("recording:rec-bside", results[0].Metadata.ExternalId);
-        Assert.Equal(2, queriesReceived.Count); // Stage 1 (no FilenameStem → Stage 2 skipped) + Stage 3
-    }
-
-    // ── Track cascade: all stages empty ──────────────────────────────────────
+    // ── All stages empty ─────────────────────────────────────────────────────
 
     [Fact]
     public async Task SearchAsync_Track_ReturnsEmptyList_WhenAllStagesEmpty()
@@ -167,32 +106,6 @@ public class MusicBrainzProviderTests
         Assert.Contains("shutdown.exe", capturedQuery);
     }
 
-    // ── Album search ─────────────────────────────────────────────────────────
-
-    [Fact]
-    public async Task SearchAsync_Album_StripYearPrefixBeforeQuery()
-    {
-        // Albums stored as "(2000) The Better Life" should strip the year prefix
-        // before querying, so the Lucene query uses "The Better Life" not "(2000) The Better Life".
-        string? capturedQuery = null;
-        var provider = BuildProvider(url =>
-        {
-            capturedQuery = Uri.UnescapeDataString(new Uri("https://mb.test/" + url).Query);
-            return Ok(OneReleaseGroup("rg-1", "The Better Life"));
-        });
-
-        var ctx = new MediaSearchContext(
-            Name:           "(2000) The Better Life",
-            HierarchyLevel: 1,
-            ParentName:     "3 Doors Down");
-
-        await provider.SearchAsync(ctx);
-
-        Assert.NotNull(capturedQuery);
-        Assert.DoesNotContain("(2000)", capturedQuery);
-        Assert.Contains("The Better Life", capturedQuery);
-    }
-
     // ── Scoring: FilenameStem exact match preferred ───────────────────────────
 
     [Fact]
@@ -221,44 +134,6 @@ public class MusicBrainzProviderTests
             $"Expected score ≥60 (exact match via FilenameStem), got {results[0].Score}");
     }
 
-    // ── Track cascade: Stage 5 (strip version qualifier) ─────────────────────
-
-    [Fact]
-    public async Task SearchAsync_Track_VersionQualifierStripped_WhenAllEarlierStagesEmpty()
-    {
-        // Stages 1–4 all return empty (no siblings in this ctx → Stage 4 skipped; Lucene
-        // phrase-match fails for "(LP version)" parentheses in Stages 1–3).
-        // Stage 5 strips the trailing parenthetical and retries with the bare title.
-        var queriesReceived = new List<string>();
-        var provider = BuildProvider(url =>
-        {
-            var qs = Uri.UnescapeDataString(new Uri("https://mb.test/" + url).Query);
-            queriesReceived.Add(qs);
-            // Only the bare-title query (no "(LP version)") returns a hit
-            return qs.Contains("LP version")
-                ? Ok(EmptyRecordings)
-                : Ok(OneRecording("rec-kryptonite", "Kryptonite (LP version)"));
-        });
-
-        var ctx = new MediaSearchContext(
-            Name:           "Kryptonite (LP version)",
-            HierarchyLevel: 2,
-            GrandparentName: "3 Doors Down",
-            ParentName:     "Kryptonite"); // no FilenameStem — stem == name
-
-        var results = await provider.SearchAsync(ctx);
-
-        Assert.Single(results);
-        Assert.Equal("recording:rec-kryptonite", results[0].Metadata.ExternalId);
-        // Stage 1 (with release) + Stage 3 (no release, still has LP version) + Stage 5 (bare title)
-        // Stage 4 (sibling reid:) is skipped because ctx has no SiblingNames.
-        Assert.Equal(3, queriesReceived.Count);
-        // Stage 5 query must NOT contain "LP version"
-        Assert.DoesNotContain("LP version", queriesReceived[2]);
-        // And must still contain the bare title
-        Assert.Contains("Kryptonite", queriesReceived[2]);
-    }
-
     // ── Artist search at root level ───────────────────────────────────────────
 
     [Fact]
@@ -281,6 +156,175 @@ public class MusicBrainzProviderTests
         {
             Content = new StringContent(json)
         };
+
+    // ── New cascade tests: AltTitles ─────────────────────────────────────────
+
+    [Fact]
+    public async Task SearchAsync_UsesAltTitles_InOrder()
+    {
+        // Stage 1b with first AltTitle "(2000) The Better Life" returns empty;
+        // Stage 1b with second AltTitle "The Better Life" returns a result.
+        var queriesReceived = new List<string>();
+        var provider = BuildProvider(url =>
+        {
+            var qs = Uri.UnescapeDataString(url);
+            queriesReceived.Add(qs);
+            // Return result only when query contains "The Better Life" without the year prefix
+            return qs.Contains("The Better Life") && !qs.Contains("2000") && !qs.Contains("firstreleasedate")
+                ? Ok(OneReleaseGroup("rg-1", "The Better Life"))
+                : Ok(EmptyReleases);
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "(2000) The Better Life",
+            HierarchyLevel: 1,
+            ParentName:     "3 Doors Down",
+            Year:           null,   // no year so only Stage 1b fires
+            AltTitles:      ["(2000) The Better Life", "The Better Life"]);
+
+        var results = await provider.SearchAsync(ctx);
+        Assert.NotEmpty(results);
+        Assert.Equal("release-group:rg-1", results[0].Metadata.ExternalId);
+    }
+
+    [Fact]
+    public async Task SearchAsync_DropsYear_WhenStage1aWithYearEmpty()
+    {
+        // Stage 1a (exact + year) returns nothing; Stage 1b (exact, no year) returns a result.
+        int callCount = 0;
+        var provider = BuildProvider(url =>
+        {
+            callCount++;
+            var qs = Uri.UnescapeDataString(url);
+            // First call has firstreleasedate constraint — return empty
+            if (qs.Contains("firstreleasedate")) return Ok(EmptyReleases);
+            // Second call has no year — return result
+            return Ok(OneReleaseGroup("rg-1", "Remixed"));
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "Remixed",
+            HierarchyLevel: 1,
+            ParentName:     "3TEETH",
+            Year:           2014,
+            AltTitles:      ["Remixed"]);
+
+        var results = await provider.SearchAsync(ctx);
+        Assert.NotEmpty(results);
+        Assert.Equal(2, callCount); // Stage 1a with year, then Stage 1b without year
+    }
+
+    [Fact]
+    public async Task SearchAsync_Track_UsesDateField_ForYear()
+    {
+        // Track searches use "date:{year}" not "firstreleasedate:{year}"
+        string? capturedQuery = null;
+        var provider = BuildProvider(url =>
+        {
+            capturedQuery = Uri.UnescapeDataString(url);
+            return Ok(OneRecording("rec-1", "Kryptonite"));
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "Kryptonite",
+            HierarchyLevel: 2,
+            GrandparentName: "3 Doors Down",
+            Year:           2000,
+            AltTitles:      ["Kryptonite"]);
+
+        await provider.SearchAsync(ctx);
+        Assert.Contains("date:2000", capturedQuery);
+        Assert.DoesNotContain("firstreleasedate", capturedQuery);
+    }
+
+    [Fact]
+    public async Task SearchAsync_Album_UsesFirstReleaseDateField_ForYear()
+    {
+        string? capturedQuery = null;
+        var provider = BuildProvider(url =>
+        {
+            capturedQuery = Uri.UnescapeDataString(url);
+            return Ok(OneReleaseGroup("rg-1", "The Better Life"));
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "The Better Life",
+            HierarchyLevel: 1,
+            ParentName:     "3 Doors Down",
+            Year:           2000,
+            AltTitles:      ["The Better Life"]);
+
+        await provider.SearchAsync(ctx);
+        // Release-group queries must use "firstreleasedate", NOT the recording-level "date" field.
+        Assert.Contains("firstreleasedate:2000", capturedQuery);
+        // Must not contain a bare "date:YYYY" field (which is the recording/track field).
+        // Note: "firstreleasedate" contains "date" as a substring, so we check for word-boundary form.
+        Assert.DoesNotContain("&date:", capturedQuery);
+        Assert.DoesNotContain("AND date:", capturedQuery);
+    }
+
+    [Fact]
+    public async Task SearchAsync_FallsThrough_ToFuzzyStage_WhenExactFails()
+    {
+        // Stages 1a and 1b (exact with and without year) return empty;
+        // Stage 2a (fuzzy with year) returns a result.
+        // Use a multi-word title so MbQuote wraps it in phrase quotes ("...") while
+        // MbSanitize leaves it unquoted — this makes exact vs fuzzy distinguishable.
+        int callCount = 0;
+        string? firstFuzzyQuery = null;
+        var provider = BuildProvider(url =>
+        {
+            callCount++;
+            var qs = Uri.UnescapeDataString(url);
+            // Exact queries: MbQuote wraps multi-word title in phrase quotes → query= starts with "
+            // Fuzzy queries: MbSanitize leaves the title unquoted → query= starts with a letter
+            var queryPart = qs.Contains("query=") ? qs.Split("query=")[1] : qs;
+            bool isFuzzy = !queryPart.TrimStart().StartsWith('"');
+            if (isFuzzy)
+            {
+                firstFuzzyQuery ??= qs;
+                return Ok(OneReleaseGroup("rg-1", "Phantom Remixed"));
+            }
+            return Ok(EmptyReleases);
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "Phantom Remixed",
+            HierarchyLevel: 1,
+            ParentName:     "3TEETH",
+            Year:           2014,
+            AltTitles:      ["Phantom Remixed"]);
+
+        var results = await provider.SearchAsync(ctx);
+        Assert.NotEmpty(results);
+        Assert.True(callCount >= 3, $"Expected ≥3 calls (1a, 1b, 2a) but got {callCount}");
+        // The first fuzzy call should include the year constraint
+        Assert.NotNull(firstFuzzyQuery);
+        Assert.Contains("firstreleasedate:2014", firstFuzzyQuery);
+    }
+
+    [Fact]
+    public async Task SearchAsync_NoAltTitles_FallsBackToContextName()
+    {
+        // When AltTitles is null, should still search using context.Name
+        string? capturedQuery = null;
+        var provider = BuildProvider(url =>
+        {
+            capturedQuery = Uri.UnescapeDataString(url);
+            return Ok(OneReleaseGroup("rg-1", "Lateralus"));
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "Lateralus",
+            HierarchyLevel: 1,
+            ParentName:     "Tool",
+            Year:           null,
+            AltTitles:      null);   // no AltTitles
+
+        var results = await provider.SearchAsync(ctx);
+        Assert.NotEmpty(results);
+        Assert.Contains("Lateralus", capturedQuery);
+    }
 }
 
 /// <summary>
