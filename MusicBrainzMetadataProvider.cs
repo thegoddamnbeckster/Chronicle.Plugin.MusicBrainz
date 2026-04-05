@@ -170,25 +170,36 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         int? year,
         CancellationToken ct)
     {
-        // Stage 1: exact title
-        if (year.HasValue)
+        string? artist = context.HierarchyLevel switch
         {
-            var r = await TryEachTitleAsync(titles, year, exact: true, context, ct);
+            0 => null,                    // searching FOR an artist — no artist constraint
+            1 => context.ParentName,      // album: artist is the parent
+            _ => context.GrandparentName  // track: artist is the grandparent
+        };
+
+        // Artist searches do not support a year constraint on MusicBrainz —
+        // skip the year-bearing attempts to avoid duplicate HTTP requests.
+        int? effectiveYear = context.HierarchyLevel == 0 ? null : year;
+
+        // Stage 1: exact title
+        if (effectiveYear.HasValue)
+        {
+            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: true, context, ct);
             if (r.Results?.Count > 0) return r;
         }
         {
-            var r = await TryEachTitleAsync(titles, null, exact: true, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, null, exact: true, context, ct);
             if (r.Results?.Count > 0) return r;
         }
 
         // Stage 2: fuzzy title
-        if (year.HasValue)
+        if (effectiveYear.HasValue)
         {
-            var r = await TryEachTitleAsync(titles, year, exact: false, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: false, context, ct);
             if (r.Results?.Count > 0) return r;
         }
         {
-            var r = await TryEachTitleAsync(titles, null, exact: false, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, null, exact: false, context, ct);
             if (r.Results?.Count > 0) return r;
         }
 
@@ -197,26 +208,19 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     private async Task<MediaMetadata> TryEachTitleAsync(
         IReadOnlyList<string> titles,
+        string? artist,
         int? year,
         bool exact,
         MediaSearchContext context,
         CancellationToken ct)
     {
-        // Determine artist constraint based on hierarchy level
-        string? artist = context.HierarchyLevel switch
-        {
-            0 => null,                    // searching FOR an artist — no artist constraint
-            1 => context.ParentName,      // album: artist is the parent
-            _ => context.GrandparentName  // track: artist is the grandparent
-        };
-
         foreach (var title in titles)
         {
             if (string.IsNullOrWhiteSpace(title)) continue;
 
             var query = context.HierarchyLevel switch
             {
-                0 => exact ? MbQuote(title) : MbSanitize(title),  // artist search — title only
+                0 => exact ? MbQuote(title) : MbSanitize(title),   // artist search — title only, no year
                 1 => BuildReleaseGroupQuery(title, artist, year, exact),
                 _ => BuildRecordingQuery(title, artist, year, exact)
             };
@@ -294,7 +298,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         // Strip chars invalid in Lucene query strings
         s = System.Text.RegularExpressions.Regex.Replace(s, @"[<>{}[\]^~""\\]", "").Trim();
         // Escape remaining Lucene special chars that must be escaped when unquoted
-        s = System.Text.RegularExpressions.Regex.Replace(s, @"([+\-!():|\?*])", @"\$1");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"([+\-!():|\?*])", "\\$1");
         return s;
     }
 
