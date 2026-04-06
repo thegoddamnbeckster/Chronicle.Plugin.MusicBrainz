@@ -171,7 +171,8 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     ///   1b. Exact, no year (all alt-titles)
     ///   2a. Fuzzy + year  (all alt-titles)
     ///   2b. Fuzzy, no year (all alt-titles)
-    /// Stages 3 and 4 (sub-item comparison) will be appended in later tasks.
+    /// Stages 3 and 4 (sub-item comparison) are handled by <see cref="RunSubItemStagesAsync"/>,
+    /// called from <see cref="SearchAsync"/> when this cascade returns no results.
     /// </summary>
     private async Task<MediaMetadata> RunCascadeAsync(
         MediaSearchContext context,
@@ -234,28 +235,31 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         if (!hasSubItemData) return [];
 
         string? artist = context.ParentName;
-        var firstTitle = titles.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
-        if (firstTitle is null) return [];
 
-        // Get candidates via fuzzy search (with year, then without year)
-        var candidatesWithYear = year.HasValue
-            ? ((await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                   _client!, BuildReleaseGroupQuery(firstTitle, artist, year, exact: false), ct))
-               .Results ?? [])
-            : (IReadOnlyList<MediaMetadata>)[];
-
-        var candidatesNoYear =
-            ((await MusicBrainzSearcher.SearchReleaseGroupsAsync(
-                 _client!, BuildReleaseGroupQuery(firstTitle, artist, null, exact: false), ct))
-             .Results ?? []);
-
-        // Merge and deduplicate candidates
+        // Get candidates via fuzzy search across all titles (with year, then without year)
         var seen = new HashSet<string>();
         var allCandidates = new List<MediaMetadata>();
-        foreach (var c in candidatesWithYear.Concat(candidatesNoYear))
+
+        void AddCandidates(IReadOnlyList<MediaMetadata> results)
         {
-            if (!string.IsNullOrEmpty(c.ExternalId) && seen.Add(c.ExternalId))
-                allCandidates.Add(c);
+            foreach (var c in results)
+                if (!string.IsNullOrEmpty(c.ExternalId) && seen.Add(c.ExternalId))
+                    allCandidates.Add(c);
+        }
+
+        foreach (var title in titles.Where(t => !string.IsNullOrWhiteSpace(t)))
+        {
+            if (year.HasValue)
+            {
+                var r = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                    _client!, BuildReleaseGroupQuery(title, artist, year, exact: false), ct);
+                AddCandidates(r.Results ?? []);
+            }
+            {
+                var r = await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                    _client!, BuildReleaseGroupQuery(title, artist, null, exact: false), ct);
+                AddCandidates(r.Results ?? []);
+            }
         }
 
         if (allCandidates.Count == 0) return [];
@@ -304,8 +308,8 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     /// <summary>
     /// Scores how well a list of MusicBrainz track titles matches Chronicle's
-    /// known child/sibling names. Returns a boost score (0..55).
-    /// +15 if track count matches exactly; +5 per name match (capped at 40).
+    /// known child/sibling names. Returns a boost score (0..55): +15 if track count matches exactly,
+    /// +5 per name match (name portion capped at 40, combined max 55).
     /// </summary>
     private static int ScoreSubItemNames(
         IReadOnlyList<(int TrackNumber, string Title, int? DurationMs)> mbTracks,
