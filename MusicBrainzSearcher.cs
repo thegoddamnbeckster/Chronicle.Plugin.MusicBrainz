@@ -88,6 +88,46 @@ internal static class MusicBrainzSearcher
         return parts.Count > 0 ? string.Join(" · ", parts) : null;
     }
 
+    /// <summary>
+    /// Returns the release MBIDs for a release-group, ordered by the list returned
+    /// by the API (typically earliest first).
+    /// </summary>
+    public static async Task<IReadOnlyList<string>>
+        FetchReleaseGroupReleasesAsync(MusicBrainzClient client, string releaseGroupMbid, CancellationToken ct)
+    {
+        var encoded = Uri.EscapeDataString(releaseGroupMbid);
+        var json = await client.GetAsync(
+            $"release?release-group={encoded}&fmt=json", ct);
+        var result = JsonSerializer.Deserialize<MbSearchResult<MbRelease>>(json, MusicBrainzJsonOptions.Opts);
+        return (result?.Releases ?? [])
+            .Select(r => r.Id)
+            .Where(id => !string.IsNullOrEmpty(id))
+            .Select(id => id!)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Fetches the track listing for a specific release by its MBID.
+    /// Returns a list of (TrackNumber, Title, DurationMs) tuples.
+    /// </summary>
+    public static async Task<IReadOnlyList<(int TrackNumber, string Title, int? DurationMs)>>
+        FetchReleaseTracksAsync(MusicBrainzClient client, string releaseMbid, CancellationToken ct)
+    {
+        var json = await client.GetAsync(
+            $"release/{releaseMbid}?inc=recordings&fmt=json", ct);
+        var release = JsonSerializer.Deserialize<MbRelease>(json, MusicBrainzJsonOptions.Opts);
+        var tracks = new List<(int, string, int?)>();
+        foreach (var medium in release?.Media ?? [])
+        {
+            foreach (var track in medium.Tracks ?? [])
+            {
+                var title = track.Title ?? track.Recording?.Title ?? string.Empty;
+                tracks.Add((track.Position, title, track.Length));
+            }
+        }
+        return tracks;
+    }
+
     internal static int? ParseYear(string? date)
     {
         if (string.IsNullOrEmpty(date)) return null;

@@ -148,12 +148,21 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         var year      = context.Year;
         var container = await RunCascadeAsync(context, titles, year, ct);
 
-        return (container.Results ?? [])
+        var candidates = (container.Results ?? [])
             .Select(r => ScoreCandidate(context, r))
             .Where(c => !string.IsNullOrEmpty(c.Metadata.ExternalId))
             .OrderByDescending(c => c.Score)
             .Take(10)
             .ToList();
+
+        // Stages 3+4: if earlier stages found nothing, try sub-item comparison
+        if (candidates.Count == 0)
+        {
+            var subItemCandidates = await RunSubItemStagesAsync(context, titles, year, ct);
+            if (subItemCandidates.Count > 0) return subItemCandidates;
+        }
+
+        return candidates;
     }
 
     /// <summary>
@@ -204,6 +213,150 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         }
 
         return new MediaMetadata();
+    }
+
+    /// <summary>
+    /// Stage 3: fuzzy search + sub-item name/count comparison.
+    /// Stage 4: fuzzy search + sub-item metadata (track number, duration) comparison.
+    /// Only implemented for HierarchyLevel 1 (albums → track list).
+    /// </summary>
+    private async Task<IReadOnlyList<ScoredCandidate>> RunSubItemStagesAsync(
+        MediaSearchContext context,
+        IReadOnlyList<string> titles,
+        int? year,
+        CancellationToken ct)
+    {
+        // Only implemented for albums (level 1) — tracks and artists handled by earlier stages
+        if (context.HierarchyLevel != 1) return [];
+
+        var localNames = context.ChildNames ?? context.SiblingNames;
+        var hasSubItemData = (localNames?.Count > 0) || (context.SubItemMetadata?.Count > 0);
+        if (!hasSubItemData) return [];
+
+        string? artist = context.ParentName;
+        var firstTitle = titles.FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+        if (firstTitle is null) return [];
+
+        // Get candidates via fuzzy search (with year, then without year)
+        var candidatesWithYear = year.HasValue
+            ? ((await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                   _client!, BuildReleaseGroupQuery(firstTitle, artist, year, exact: false), ct))
+               .Results ?? [])
+            : (IReadOnlyList<MediaMetadata>)[];
+
+        var candidatesNoYear =
+            ((await MusicBrainzSearcher.SearchReleaseGroupsAsync(
+                 _client!, BuildReleaseGroupQuery(firstTitle, artist, null, exact: false), ct))
+             .Results ?? []);
+
+        // Merge and deduplicate candidates
+        var seen = new HashSet<string>();
+        var allCandidates = new List<MediaMetadata>();
+        foreach (var c in candidatesWithYear.Concat(candidatesNoYear))
+        {
+            if (!string.IsNullOrEmpty(c.ExternalId) && seen.Add(c.ExternalId))
+                allCandidates.Add(c);
+        }
+
+        if (allCandidates.Count == 0) return [];
+
+        // For each candidate, fetch its track listing and compute sub-item score
+        var scored = new List<ScoredCandidate>();
+        foreach (var candidate in allCandidates)
+        {
+            var baseScore = ScoreCandidate(context, candidate);
+
+            // ExternalId format: "release-group:{mbid}"
+            var rgMbid = candidate.ExternalId?.Replace("release-group:", "");
+            if (string.IsNullOrEmpty(rgMbid)) { scored.Add(baseScore); continue; }
+
+            try
+            {
+                var releaseIds = await MusicBrainzSearcher.FetchReleaseGroupReleasesAsync(
+                    _client!, rgMbid, ct);
+                if (releaseIds.Count == 0) { scored.Add(baseScore); continue; }
+
+                // Use the first release in the list
+                var tracks = await MusicBrainzSearcher.FetchReleaseTracksAsync(
+                    _client!, releaseIds[0], ct);
+
+                // Stage 3: name + count boost
+                int subItemBoost = ScoreSubItemNames(tracks, localNames);
+
+                // Stage 4: metadata boost (track numbers + durations)
+                subItemBoost += ScoreSubItemMetadata(tracks, context.SubItemMetadata);
+
+                scored.Add(baseScore with { Score = baseScore.Score + subItemBoost });
+            }
+            catch (Exception)
+            {
+                // If sub-item fetch fails, fall back to base score
+                scored.Add(baseScore);
+            }
+        }
+
+        return scored
+            .Where(c => !string.IsNullOrEmpty(c.Metadata.ExternalId))
+            .OrderByDescending(c => c.Score)
+            .Take(10)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Scores how well a list of MusicBrainz track titles matches Chronicle's
+    /// known child/sibling names. Returns a boost score (0..55).
+    /// +15 if track count matches exactly; +5 per name match (capped at 40).
+    /// </summary>
+    private static int ScoreSubItemNames(
+        IReadOnlyList<(int TrackNumber, string Title, int? DurationMs)> mbTracks,
+        IReadOnlyList<string>? localNames)
+    {
+        if (localNames is null || localNames.Count == 0) return 0;
+        int score = 0;
+
+        if (mbTracks.Count == localNames.Count) score += 15;
+
+        var mbNormalized = mbTracks.Select(t => Normalize(t.Title)).ToHashSet();
+        int nameMatches = localNames.Count(n => mbNormalized.Contains(Normalize(n)));
+        score += Math.Min(nameMatches * 5, 40);
+
+        return score;
+    }
+
+    /// <summary>Duration tolerance in seconds for sub-item metadata comparison (Stage 4).</summary>
+    private const int DurationToleranceSeconds = 10;
+
+    /// <summary>
+    /// Scores how well MusicBrainz track metadata matches Chronicle's SiblingInfo list.
+    /// Returns a boost score (0..60).
+    /// +10 per track with matching track number; +10 per track with duration within tolerance.
+    /// </summary>
+    private static int ScoreSubItemMetadata(
+        IReadOnlyList<(int TrackNumber, string Title, int? DurationMs)> mbTracks,
+        IReadOnlyList<SiblingInfo>? localItems)
+    {
+        if (localItems is null || localItems.Count == 0) return 0;
+        int score = 0;
+
+        // Build a lookup: MusicBrainz track number → duration in seconds
+        var mbByNumber = mbTracks.ToDictionary(
+            t => t.TrackNumber,
+            t => t.DurationMs.HasValue ? t.DurationMs.Value / 1000 : (int?)null);
+
+        foreach (var local in localItems)
+        {
+            if (local.ItemNumber.HasValue && mbByNumber.ContainsKey(local.ItemNumber.Value))
+                score += 10;
+
+            if (local.DurationSeconds.HasValue && local.ItemNumber.HasValue &&
+                mbByNumber.TryGetValue(local.ItemNumber.Value, out var mbDurSec) &&
+                mbDurSec.HasValue &&
+                Math.Abs(local.DurationSeconds.Value - mbDurSec.Value) <= DurationToleranceSeconds)
+                score += 10;
+        }
+
+        // Cap at 60 to avoid overwhelming earlier-stage title match scores
+        return Math.Min(score, 60);
     }
 
     private async Task<MediaMetadata> TryEachTitleAsync(

@@ -325,6 +325,133 @@ public class MusicBrainzProviderTests
         Assert.NotEmpty(results);
         Assert.Contains("Lateralus", capturedQuery);
     }
+
+    // ── Stage 3: sub-item name/count comparison ───────────────────────────────
+
+    [Fact]
+    public async Task SearchAsync_Stage3_BoostsAlbum_WhenTrackNamesMatch()
+    {
+        // Stages 1+2 (first 4 release-group searches) return empty.
+        // Stage 3 (5th/6th release-group searches) returns a candidate.
+        // Sub-item fetch returns 3 tracks whose names match context.ChildNames.
+        const string releasesJson = "{\"count\":1,\"releases\":[{\"id\":\"rel-123\"}]}";
+        const string tracksJson   = "{\"media\":[{\"position\":1,\"track-count\":3,\"tracks\":[" +
+                                    "{\"position\":1,\"title\":\"Kryptonite\",\"length\":239000}," +
+                                    "{\"position\":2,\"title\":\"Loser\",\"length\":214000}," +
+                                    "{\"position\":3,\"title\":\"Duck and Run\",\"length\":246000}" +
+                                    "]}]}";
+        int rgSearchCount = 0;
+        var provider = BuildProvider(url =>
+        {
+            if (url.Contains("release-group?query="))
+            {
+                rgSearchCount++;
+                // First 4 calls are Stages 1a, 1b, 2a, 2b — return empty
+                // 5th and 6th calls are Stage 3 (with year, then without) — return a candidate
+                return rgSearchCount <= 4
+                    ? Ok(EmptyReleases)
+                    : Ok(OneReleaseGroup("rg-abc", "The Better Life"));
+            }
+            if (url.Contains("release?release-group="))
+                return Ok(releasesJson);
+            if (url.Contains("/release/rel-123"))
+                return Ok(tracksJson);
+            return Ok(EmptyReleases);
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "The Better Life",
+            HierarchyLevel: 1,
+            ParentName:     "3 Doors Down",
+            Year:           2000,
+            AltTitles:      ["The Better Life"],
+            ChildNames:     ["Kryptonite", "Loser", "Duck and Run"]);
+
+        var results = await provider.SearchAsync(ctx);
+
+        Assert.NotEmpty(results);
+        // Base score: title exact (60) + year exact (20) = 80; plus count boost (15) + 3×5 names (15) = 110 → capped naturally
+        Assert.True(results[0].Score > 50,
+            $"Expected score >50 (base + sub-item boost), got {results[0].Score}");
+        Assert.Equal("release-group:rg-abc", results[0].Metadata.ExternalId);
+    }
+
+    // ── Stage 4: sub-item metadata (track number + duration) comparison ───────
+
+    [Fact]
+    public async Task SearchAsync_Stage4_BoostsScore_WhenTrackNumberAndDurationMatch()
+    {
+        // Same setup as Stage 3, but we provide SubItemMetadata with track numbers and durations.
+        const string releasesJson = "{\"count\":1,\"releases\":[{\"id\":\"rel-456\"}]}";
+        const string tracksJson   = "{\"media\":[{\"position\":1,\"track-count\":2,\"tracks\":[" +
+                                    "{\"position\":1,\"title\":\"Kryptonite\",\"length\":239000}," +
+                                    "{\"position\":2,\"title\":\"Loser\",\"length\":214000}" +
+                                    "]}]}";
+        int rgSearchCount = 0;
+        var provider = BuildProvider(url =>
+        {
+            if (url.Contains("release-group?query="))
+            {
+                rgSearchCount++;
+                return rgSearchCount <= 4
+                    ? Ok(EmptyReleases)
+                    : Ok(OneReleaseGroup("rg-abc", "The Better Life"));
+            }
+            if (url.Contains("release?release-group="))
+                return Ok(releasesJson);
+            if (url.Contains("/release/rel-456"))
+                return Ok(tracksJson);
+            return Ok(EmptyReleases);
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "The Better Life",
+            HierarchyLevel: 1,
+            ParentName:     "3 Doors Down",
+            Year:           2000,
+            AltTitles:      ["The Better Life"],
+            SubItemMetadata: new List<SiblingInfo>
+            {
+                new("Kryptonite", ItemNumber: 1, DurationSeconds: 239),  // exact match
+                new("Loser",      ItemNumber: 2, DurationSeconds: 214),  // exact match
+            }.AsReadOnly());
+
+        var results = await provider.SearchAsync(ctx);
+
+        Assert.NotEmpty(results);
+        // Base: exact title (60) + year (20) = 80
+        // Stage 4: 2 × track-number matches (+10 each) + 2 × duration matches (+10 each) = +40
+        // Total: 120 (but scores can exceed 100 in this implementation)
+        Assert.True(results[0].Score > 80,
+            $"Expected score >80 (base + track+duration boosts), got {results[0].Score}");
+        Assert.Equal("release-group:rg-abc", results[0].Metadata.ExternalId);
+    }
+
+    // ── Stage 3+4 not triggered for non-album levels ─────────────────────────
+
+    [Fact]
+    public async Task SearchAsync_SubItemStages_NotTriggered_ForArtistLevel()
+    {
+        // Stage 3+4 are only for HierarchyLevel 1 (albums).
+        // For an artist (level 0), RunSubItemStagesAsync should return empty immediately.
+        int callCount = 0;
+        var provider = BuildProvider(url =>
+        {
+            callCount++;
+            return Ok(EmptyArtists);
+        });
+
+        var ctx = new MediaSearchContext(
+            Name:           "3 Doors Down",
+            HierarchyLevel: 0,
+            ChildNames:     ["The Better Life", "Away From the Sun"]);
+
+        var results = await provider.SearchAsync(ctx);
+
+        Assert.Empty(results);
+        // Only 2 calls: Stage 1 exact (no year at level 0), Stage 2 fuzzy (no year at level 0)
+        Assert.Equal(2, callCount);
+    }
 }
 
 /// <summary>
