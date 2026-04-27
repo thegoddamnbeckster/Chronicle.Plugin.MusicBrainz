@@ -5,7 +5,7 @@ namespace Chronicle.Plugin.MusicBrainz;
 
 /// <summary>
 /// Chronicle metadata provider for MusicBrainz.
-/// Supports "music", "album", and "artist" media types. No API key required.
+/// Supports "music" (Artist → Album → Track hierarchy) and "audiobooks" media types.
 /// </summary>
 public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 {
@@ -13,7 +13,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     public string PluginId => "chronicle.plugin.musicbrainz";
     public string Name     => "MusicBrainz";
-    public string Version  => "1.0.3";
+    public string Version  => "1.0.4";
     public string Author   => "Chronicle Contributors";
 
     // ── Settings keys ─────────────────────────────────────────────────────────
@@ -41,21 +41,27 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     [
         new MediaTypeSupport
         {
-            MediaTypeName   = "music",
-            DefaultPriority = 10,
-            SupportedFields = ["title", "overview", "year", "poster_url", "genres", "cast", "directors", "rating"],
+            MediaTypeName    = "music",
+            DisplayName      = "Music",
+            HierarchyLevels  = 3,
+            HierarchyLabels  = ["Artist", "Album", "Track"],
+            InteractionVerb  = "listened",
+            DefaultPriority  = 10,
+            SupportedFields  = ["title", "overview", "poster_url", "genres", "rating", "tags"],
+            LevelFields = new Dictionary<int, List<string>>
+            {
+                [1] = ["title", "overview", "year", "poster_url", "genres", "rating", "tags"],
+                [2] = ["title", "year", "runtime_minutes", "tags"],
+            },
         },
         new MediaTypeSupport
         {
-            MediaTypeName   = "album",
+            MediaTypeName   = "audiobooks",
+            DisplayName     = "Audiobooks",
+            HierarchyLevels = 1,
+            InteractionVerb = "listened",
             DefaultPriority = 10,
-            SupportedFields = ["title", "overview", "year", "poster_url", "genres", "cast", "directors", "rating"],
-        },
-        new MediaTypeSupport
-        {
-            MediaTypeName   = "artist",
-            DefaultPriority = 10,
-            SupportedFields = ["title", "overview", "year", "genres"],
+            SupportedFields = ["title", "overview", "year", "poster_url", "genres", "cast", "rating", "tags"],
         },
     ];
 
