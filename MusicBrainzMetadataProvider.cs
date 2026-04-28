@@ -201,6 +201,12 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
                 _ => context.GrandparentName  // track: artist is the grandparent
             };
 
+        // For audiobooks the author is a mandatory search constraint.
+        // A title-only search would match music albums with the same name, so if no
+        // author is available we return nothing and let the enrichment mark it NotFound.
+        if (isAudiobook && context.HierarchyLevel == 0 && artist is null)
+            return new MediaMetadata();
+
         // Artist searches do not support a year constraint on MusicBrainz.
         // Audiobooks and albums always use year.
         int? effectiveYear = (!isAudiobook && context.HierarchyLevel == 0) ? null : year;
@@ -391,7 +397,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             if (string.IsNullOrWhiteSpace(title)) continue;
 
             var query = (isAudiobook && context.HierarchyLevel == 0)
-                ? BuildReleaseGroupQuery(title, artist, year, exact)   // book → release group
+                ? BuildReleaseGroupQuery(title, artist, year, exact, audiobookOnly: true)
                 : context.HierarchyLevel switch
                 {
                     0 => exact ? MbQuote(title) : MbSanitize(title),  // artist search
@@ -432,14 +438,17 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     /// <summary>
     /// Builds a MusicBrainz release-group (album) Lucene query.
     /// Year maps to the <c>firstreleasedate</c> field on release-groups.
+    /// Pass <paramref name="audiobookOnly"/> to add <c>secondarytype:Audiobook</c>,
+    /// which prevents music albums from matching audiobook title searches.
     /// </summary>
     private static string BuildReleaseGroupQuery(
-        string title, string? artist, int? year, bool exact)
+        string title, string? artist, int? year, bool exact, bool audiobookOnly = false)
     {
         var titlePart = exact ? MbQuote(title) : MbSanitize(title);
         var parts = new List<string> { titlePart };
         if (artist is not null)  parts.Add($"artist:{MbQuote(artist)}");
         if (year   is not null)  parts.Add($"firstreleasedate:{year}");
+        if (audiobookOnly)       parts.Add("secondarytype:Audiobook");
         return string.Join(" AND ", parts);
     }
 
