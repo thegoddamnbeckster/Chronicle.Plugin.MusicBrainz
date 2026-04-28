@@ -582,10 +582,38 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             "artist"        => await MusicBrainzEntityFetcher.FetchArtistAsync(_client!, mbid, ct),
             "release-group" => await MusicBrainzEntityFetcher.FetchReleaseGroupAsync(_client!, mbid, ct),
             "recording"     => await MusicBrainzEntityFetcher.FetchRecordingAsync(_client!, mbid, ct),
+            // A specific release URL was stored (e.g. from Fix Match). Look up its parent
+            // release-group and delegate there — release-groups are the canonical identifier.
+            "release"       => await FetchReleaseAsReleaseGroupAsync(mbid, ct),
             _ => throw new ArgumentException(
                 $"Unknown MusicBrainz entity type: '{type}'. " +
                 "Supported types: artist, release-group, recording.")
         };
+    }
+
+    /// <summary>
+    /// Resolves a specific MusicBrainz release MBID to its parent release-group and
+    /// delegates to <see cref="MusicBrainzEntityFetcher.FetchReleaseGroupAsync"/>.
+    /// This normalises Fix Match URLs that point to a release instead of a release-group.
+    /// </summary>
+    private async Task<MediaMetadata> FetchReleaseAsReleaseGroupAsync(
+        string releaseMbid, CancellationToken ct)
+    {
+        var json = await _client!.GetAsync(
+            $"release/{releaseMbid}?inc=release-groups&fmt=json", ct).ConfigureAwait(false);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("release-group", out var rgEl)
+            || !rgEl.TryGetProperty("id", out var rgIdEl))
+            throw new InvalidOperationException(
+                $"MusicBrainz release/{releaseMbid} response contained no release-group ID.");
+
+        var rgMbid = rgIdEl.GetString()
+            ?? throw new InvalidOperationException(
+                $"MusicBrainz release/{releaseMbid} release-group ID was null.");
+
+        return await MusicBrainzEntityFetcher.FetchReleaseGroupAsync(_client!, rgMbid, ct)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
