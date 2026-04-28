@@ -8,17 +8,38 @@ Fetches music metadata — albums, artists, genres, track listings, and cover ar
 
 | Media Type | Fields |
 |------------|--------|
-| `album`    | title, year, poster_url (cover art), genres, cast (performers), runtime_minutes |
-| `artist`   | title, year, genres, overview (type, country, active period) |
+| `music` (albums) | title, year, poster_url (cover art), genres, cast (performers), runtime_minutes |
+| `music` (artists) | title, year, genres, overview (type, country, active period) |
+| `audiobooks` | title, year, poster_url (cover art), overview, cast (author/narrator) |
+
+## Audiobook Support
+
+Chronicle stores audiobooks as flat items (no track hierarchy). The plugin searches MusicBrainz release groups filtered by `secondarytype:Audiobook`. When enriching audiobooks:
+
+- The **author** is read from `fileScanner.author` in the item's metadata JSON, or derived from the parent directory of the stored book-folder path (for items imported before the author field was written).
+- The **short title** is extracted from the audiobook folder name (e.g. `Series - 2 - (2021) - Short Title` → `"Short Title"`) and tried first, before the full AudioAlbum tag which may contain a publisher subtitle that MusicBrainz does not index.
+- If no author can be found, the search is skipped (MusicBrainz audiobook search requires an artist to be useful).
+
+## External ID Format
+
+`{type}:{mbid}` where MBID is the MusicBrainz UUID:
+
+- `release-group:f4179994-7621-4a46-b272-c62d8b3b9b1b` → a release group (album)
+- `artist:5b11f4ce-a62d-471e-81fc-a69a8278c7da` → Nirvana
+- `release:...` → a specific pressing/edition — automatically resolved to its parent release group
+
+Fix Match accepts MusicBrainz URLs:
+- `https://musicbrainz.org/release-group/f4179994-...`
+- `https://musicbrainz.org/release/...` (resolved to release-group automatically)
 
 ## Installation
 
-1. Build the plugin in Release mode:
+1. Build the plugin:
    ```powershell
-   dotnet publish -c Release -o ./publish
+   dotnet build -c Release
    ```
 
-2. In the Chronicle web UI → **Plugins** → **Install Plugin**, enter the path to `Chronicle.Plugin.MusicBrainz.dll` inside the `publish/` folder.
+2. Copy `bin\Release\net9.0\*.dll` and `manifest.json` into your Chronicle `plugins\chronicle.plugin.musicbrainz\` directory.
 
 3. Optionally configure a custom User-Agent string in plugin settings.
 
@@ -27,27 +48,15 @@ Fetches music metadata — albums, artists, genres, track listings, and cover ar
 | Setting | Required | Default | Description |
 |---------|----------|---------|-------------|
 | `user_agent` | | `Chronicle/1.0 (...)` | MusicBrainz requires a descriptive User-Agent. See [Rate Limiting](https://wiki.musicbrainz.org/MusicBrainz_API/Rate_Limiting). |
-| `fetch_cover_art` | | `true` | Download album art from the Cover Art Archive. Disable for metadata-only mode. |
+| `fetch_cover_art` | | `true` | Download album art from the Cover Art Archive. |
 
-> **Rate limiting:** MusicBrainz allows ~1 request/second for anonymous clients. Chronicle's plugin
-> system does not currently implement automatic throttling — avoid bulk metadata refreshes.
-
-## External ID Format
-
-This plugin uses the format `{type}:{mbid}` where MBID is the MusicBrainz UUID:
-
-- `album:f4179994-7621-4a46-b272-c62d8b3b9b1b` → a specific release
-- `artist:5b11f4ce-a62d-471e-81fc-a69a8278c7da` → Nirvana
+> **Rate limiting:** MusicBrainz allows ~1 request/second for anonymous clients.
 
 ## Development
 
-This plugin references Chronicle.Plugins via a local path reference for development.
-
 ```xml
-<!-- Development (local) -->
 <ProjectReference Include="..\Chronicle\src\Chronicle.Plugins\Chronicle.Plugins.csproj"
                   Private="false" ExcludeAssets="runtime" />
-
-<!-- Production (NuGet) -->
-<PackageReference Include="Chronicle.Plugins" Version="x.y.z" />
 ```
+
+`Chronicle.Plugins.dll` must **not** be copied to the plugin output directory — the host provides it.
