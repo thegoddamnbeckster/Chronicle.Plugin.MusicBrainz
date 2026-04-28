@@ -186,36 +186,44 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         int? year,
         CancellationToken ct)
     {
-        string? artist = context.HierarchyLevel switch
-        {
-            0 => null,                    // searching FOR an artist — no artist constraint
-            1 => context.ParentName,      // album: artist is the parent
-            _ => context.GrandparentName  // track: artist is the grandparent
-        };
+        // Audiobooks are flat (HierarchyLevels=1) so the book itself is at level 0.
+        // We must NOT search for it as an artist — search as a release group instead,
+        // using ParentName (populated from the fileScanner "author" field) as the artist.
+        bool isAudiobook = string.Equals(
+            context.MediaTypeName, "audiobooks", StringComparison.OrdinalIgnoreCase);
 
-        // Artist searches do not support a year constraint on MusicBrainz —
-        // skip the year-bearing attempts to avoid duplicate HTTP requests.
-        int? effectiveYear = context.HierarchyLevel == 0 ? null : year;
+        string? artist = (isAudiobook && context.HierarchyLevel == 0)
+            ? context.ParentName          // author stored in ParentName for audiobooks
+            : context.HierarchyLevel switch
+            {
+                0 => null,                    // searching FOR an artist — no artist constraint
+                1 => context.ParentName,      // album: artist is the parent
+                _ => context.GrandparentName  // track: artist is the grandparent
+            };
+
+        // Artist searches do not support a year constraint on MusicBrainz.
+        // Audiobooks and albums always use year.
+        int? effectiveYear = (!isAudiobook && context.HierarchyLevel == 0) ? null : year;
 
         // Stage 1: exact title
         if (effectiveYear.HasValue)
         {
-            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: true, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: true, context, isAudiobook, ct);
             if (r.Results?.Count > 0) return r;
         }
         {
-            var r = await TryEachTitleAsync(titles, artist, null, exact: true, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, null, exact: true, context, isAudiobook, ct);
             if (r.Results?.Count > 0) return r;
         }
 
         // Stage 2: fuzzy title
         if (effectiveYear.HasValue)
         {
-            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: false, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, effectiveYear, exact: false, context, isAudiobook, ct);
             if (r.Results?.Count > 0) return r;
         }
         {
-            var r = await TryEachTitleAsync(titles, artist, null, exact: false, context, ct);
+            var r = await TryEachTitleAsync(titles, artist, null, exact: false, context, isAudiobook, ct);
             if (r.Results?.Count > 0) return r;
         }
 
@@ -375,25 +383,30 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         int? year,
         bool exact,
         MediaSearchContext context,
+        bool isAudiobook,
         CancellationToken ct)
     {
         foreach (var title in titles)
         {
             if (string.IsNullOrWhiteSpace(title)) continue;
 
-            var query = context.HierarchyLevel switch
-            {
-                0 => exact ? MbQuote(title) : MbSanitize(title),   // artist search — title only, no year
-                1 => BuildReleaseGroupQuery(title, artist, year, exact),
-                _ => BuildRecordingQuery(title, artist, year, exact)
-            };
+            var query = (isAudiobook && context.HierarchyLevel == 0)
+                ? BuildReleaseGroupQuery(title, artist, year, exact)   // book → release group
+                : context.HierarchyLevel switch
+                {
+                    0 => exact ? MbQuote(title) : MbSanitize(title),  // artist search
+                    1 => BuildReleaseGroupQuery(title, artist, year, exact),
+                    _ => BuildRecordingQuery(title, artist, year, exact)
+                };
 
-            var result = context.HierarchyLevel switch
-            {
-                0 => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
-                1 => await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct),
-                _ => await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query, ct)
-            };
+            var result = (isAudiobook && context.HierarchyLevel == 0)
+                ? await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct)
+                : context.HierarchyLevel switch
+                {
+                    0 => await MusicBrainzSearcher.SearchArtistsAsync(_client!, query, ct),
+                    1 => await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct),
+                    _ => await MusicBrainzSearcher.SearchRecordingsAsync(_client!, query, ct)
+                };
 
             if (result.Results?.Count > 0) return result;
         }
