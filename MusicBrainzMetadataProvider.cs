@@ -388,7 +388,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
     // ── Audiobook level helpers ───────────────────────────────────────────────
 
-    /// <summary>Level 0 audiobook — searches for the author as a MusicBrainz artist.</summary>
+    /// <summary>Level 0 audiobook — searches for the author as a MusicBrainz artist (person only).</summary>
     private async Task<MediaMetadata> RunAudiobookAuthorSearchAsync(
         IReadOnlyList<string> titles, int? year, CancellationToken ct)
     {
@@ -396,9 +396,10 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         {
             if (string.IsNullOrWhiteSpace(title)) continue;
             // Year is irrelevant for authors; just search by name.
-            var result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbQuote(title), ct);
+            // personOnly: true — band/group/orchestra names are never valid author matches.
+            var result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbQuote(title), ct, personOnly: true);
             if (result.Results?.Count > 0) return result;
-            result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbSanitize(title), ct);
+            result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbSanitize(title), ct, personOnly: true);
             if (result.Results?.Count > 0) return result;
         }
         return new MediaMetadata();

@@ -7,21 +7,34 @@ namespace Chronicle.Plugin.MusicBrainz;
 internal static class MusicBrainzSearcher
 {
     public static async Task<MediaMetadata> SearchArtistsAsync(
-        MusicBrainzClient client, string query, CancellationToken ct)
+        MusicBrainzClient client, string query, CancellationToken ct,
+        bool personOnly = false)
     {
         var encoded = Uri.EscapeDataString(query);
         var json = await client.GetAsync($"artist?query={encoded}&limit=10&fmt=json", ct);
         var result = JsonSerializer.Deserialize<MbSearchResult<MbArtist>>(json, MusicBrainzJsonOptions.Opts);
-        var items = (result?.Artists ?? []).Select(a => new MediaMetadata
-        {
-            ExternalId = $"artist:{a.Id}",
-            Source     = "MusicBrainz",
-            Title      = a.Name ?? string.Empty,
-            Overview   = BuildArtistSummary(a),
-            Year       = ParseYear(a.LifeSpan?.Begin)
-        }).ToList();
+        var items = (result?.Artists ?? [])
+            .Where(a => !personOnly || IsPersonArtistType(a.Type))
+            .Select(a => new MediaMetadata
+            {
+                ExternalId = $"artist:{a.Id}",
+                Source     = "MusicBrainz",
+                Title      = a.Name ?? string.Empty,
+                Overview   = BuildArtistSummary(a),
+                Year       = ParseYear(a.LifeSpan?.Begin)
+            }).ToList();
         return new MediaMetadata { Results = items, TotalResults = result?.Count ?? 0 };
     }
+
+    /// <summary>
+    /// Returns true for artist types that can be an audiobook author (Person or unknown).
+    /// Rejects Group, Orchestra, Choir, Character, and Other — none of these can be an author.
+    /// Null/empty type is allowed because some legitimate MusicBrainz author entries predate
+    /// the type cleanup effort and may not yet have a type set.
+    /// </summary>
+    private static bool IsPersonArtistType(string? type) =>
+        string.IsNullOrEmpty(type) ||
+        string.Equals(type, "Person", StringComparison.OrdinalIgnoreCase);
 
     public static async Task<MediaMetadata> SearchReleaseGroupsAsync(
         MusicBrainzClient client, string query, CancellationToken ct)
