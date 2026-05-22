@@ -58,10 +58,11 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         {
             MediaTypeName   = "audiobooks",
             DisplayName     = "Audiobooks",
-            HierarchyLevels = 1,
+            HierarchyLevels = 3,
+            HierarchyLabels = ["Author", "Series", "Book"],
             InteractionVerb = "listened",
             DefaultPriority = 10,
-            SupportedFields = ["title", "overview", "year", "poster_url", "genres", "cast", "rating", "tags"],
+            SupportedFields = ["title", "overview", "year", "poster_url", "genres", "cast", "rating", "runtime_minutes", "tags"],
         },
     ];
 
@@ -186,30 +187,32 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         int? year,
         CancellationToken ct)
     {
-        // Audiobooks are flat (HierarchyLevels=1) so the book itself is at level 0.
-        // We must NOT search for it as an artist — search as a release group instead,
-        // using ParentName (populated from the fileScanner "author" field) as the artist.
         bool isAudiobook = string.Equals(
             context.MediaTypeName, "audiobooks", StringComparison.OrdinalIgnoreCase);
 
-        string? artist = (isAudiobook && context.HierarchyLevel == 0)
-            ? context.ParentName          // author stored in ParentName for audiobooks
-            : context.HierarchyLevel switch
+        // ── 3-level audiobook routing ─────────────────────────────────────────
+        // Level 0 = Author  → search as artist
+        // Level 1 = Series  → search MusicBrainz series (nice-to-have; returns empty if not found)
+        // Level 2 = Book    → search release-group with secondarytype:Audiobook
+        if (isAudiobook)
+        {
+            return context.HierarchyLevel switch
             {
-                0 => null,                    // searching FOR an artist — no artist constraint
-                1 => context.ParentName,      // album: artist is the parent
-                _ => context.GrandparentName  // track: artist is the grandparent
+                0 => await RunAudiobookAuthorSearchAsync(titles, year, ct),
+                1 => await RunAudiobookSeriesSearchAsync(titles, ct),
+                _ => await RunAudiobookBookSearchAsync(context, titles, year, ct),
             };
+        }
 
-        // For audiobooks the author is a mandatory search constraint.
-        // A title-only search would match music albums with the same name, so if no
-        // author is available we return nothing and let the enrichment mark it NotFound.
-        if (isAudiobook && context.HierarchyLevel == 0 && artist is null)
-            return new MediaMetadata();
+        string? artist = context.HierarchyLevel switch
+        {
+            0 => null,                    // searching FOR an artist — no artist constraint
+            1 => context.ParentName,      // album: artist is the parent
+            _ => context.GrandparentName  // track: artist is the grandparent
+        };
 
         // Artist searches do not support a year constraint on MusicBrainz.
-        // Audiobooks and albums always use year.
-        int? effectiveYear = (!isAudiobook && context.HierarchyLevel == 0) ? null : year;
+        int? effectiveYear = context.HierarchyLevel == 0 ? null : year;
 
         // Stage 1: exact title
         if (effectiveYear.HasValue)
@@ -381,6 +384,104 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
         // Cap at 60 to avoid overwhelming earlier-stage title match scores
         return Math.Min(score, 60);
+    }
+
+    // ── Audiobook level helpers ───────────────────────────────────────────────
+
+    /// <summary>Level 0 audiobook — searches for the author as a MusicBrainz artist.</summary>
+    private async Task<MediaMetadata> RunAudiobookAuthorSearchAsync(
+        IReadOnlyList<string> titles, int? year, CancellationToken ct)
+    {
+        foreach (var title in titles)
+        {
+            if (string.IsNullOrWhiteSpace(title)) continue;
+            // Year is irrelevant for authors; just search by name.
+            var result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbQuote(title), ct);
+            if (result.Results?.Count > 0) return result;
+            result = await MusicBrainzSearcher.SearchArtistsAsync(_client!, MbSanitize(title), ct);
+            if (result.Results?.Count > 0) return result;
+        }
+        return new MediaMetadata();
+    }
+
+    /// <summary>
+    /// Level 1 audiobook — tries to find a MusicBrainz series for the audiobook series name.
+    /// Gracefully returns empty (no results) if the series is not found, because MusicBrainz
+    /// audiobook series coverage is incomplete — the calling enrichment engine will leave the
+    /// series at NotFound rather than erroring out.
+    /// </summary>
+    private async Task<MediaMetadata> RunAudiobookSeriesSearchAsync(
+        IReadOnlyList<string> titles, CancellationToken ct)
+    {
+        try
+        {
+            foreach (var title in titles)
+            {
+                if (string.IsNullOrWhiteSpace(title)) continue;
+                var result = await MusicBrainzSearcher.SearchAudiobookSeriesAsync(_client!, title, ct);
+                if (result.Results?.Count > 0) return result;
+            }
+        }
+        catch
+        {
+            // Series search is nice-to-have — silently swallow all errors.
+        }
+        return new MediaMetadata();
+    }
+
+    /// <summary>
+    /// Level 2 audiobook — searches for a book as a release-group with secondarytype:Audiobook.
+    /// Uses ParentName (series name) or GrandparentName (author name) as the artist constraint.
+    /// </summary>
+    private async Task<MediaMetadata> RunAudiobookBookSearchAsync(
+        MediaSearchContext context,
+        IReadOnlyList<string> titles,
+        int? year,
+        CancellationToken ct)
+    {
+        // Author is GrandparentName (Author → Series → Book); ParentName is the series.
+        // Fall back to ParentName if GrandparentName is absent (Author → Book path).
+        var author = context.GrandparentName ?? context.ParentName;
+
+        if (author is null)
+            return new MediaMetadata(); // Without author, MusicBrainz book search is unreliable.
+
+        // Stage 1a: exact + year
+        if (year.HasValue)
+        {
+            var r = await TryBookTitlesAsync(titles, author, year, exact: true, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        // Stage 1b: exact, no year
+        {
+            var r = await TryBookTitlesAsync(titles, author, null, exact: true, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        // Stage 2a: fuzzy + year
+        if (year.HasValue)
+        {
+            var r = await TryBookTitlesAsync(titles, author, year, exact: false, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        // Stage 2b: fuzzy, no year
+        {
+            var r = await TryBookTitlesAsync(titles, author, null, exact: false, ct);
+            if (r.Results?.Count > 0) return r;
+        }
+        return new MediaMetadata();
+    }
+
+    private async Task<MediaMetadata> TryBookTitlesAsync(
+        IReadOnlyList<string> titles, string author, int? year, bool exact, CancellationToken ct)
+    {
+        foreach (var title in titles)
+        {
+            if (string.IsNullOrWhiteSpace(title)) continue;
+            var query = BuildReleaseGroupQuery(title, author, year, exact, audiobookOnly: true);
+            var result = await MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, query, ct);
+            if (result.Results?.Count > 0) return result;
+        }
+        return new MediaMetadata();
     }
 
     private async Task<MediaMetadata> TryEachTitleAsync(
@@ -585,9 +686,11 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             // A specific release URL was stored (e.g. from Fix Match). Look up its parent
             // release-group and delegate there — release-groups are the canonical identifier.
             "release"       => await FetchReleaseAsReleaseGroupAsync(mbid, ct),
+            // Audiobook series (nice-to-have; may return minimal metadata)
+            "series"        => await MusicBrainzEntityFetcher.FetchSeriesAsync(_client!, mbid, ct),
             _ => throw new ArgumentException(
                 $"Unknown MusicBrainz entity type: '{type}'. " +
-                "Supported types: artist, release-group, recording.")
+                "Supported types: artist, release-group, recording, series.")
         };
     }
 

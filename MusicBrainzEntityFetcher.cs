@@ -516,4 +516,27 @@ internal static class MusicBrainzEntityFetcher
     };
 
     internal static int? ParseYear(string? date) => MusicBrainzSearcher.ParseYear(date);
+
+    // ── FetchSeriesAsync ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Fetches a MusicBrainz series entity (used for audiobook series at HierarchyLevel 1).
+    /// Returns minimal metadata (title only) — MusicBrainz series records rarely have full detail.
+    /// </summary>
+    public static async Task<MediaMetadata> FetchSeriesAsync(
+        MusicBrainzClient client, string mbid, CancellationToken ct)
+    {
+        var json = await client.GetAsync($"series/{mbid}?fmt=json", ct);
+        using var doc = JsonDocument.Parse(json);
+        var root  = doc.RootElement;
+        var name  = root.TryGetProperty("name",  out var n) ? n.GetString() ?? string.Empty : string.Empty;
+        var type  = root.TryGetProperty("type",  out var t) ? t.GetString() : null;
+        return new MediaMetadata
+        {
+            ExternalId = $"series:{mbid}",
+            Source     = "MusicBrainz",
+            Title      = name,
+            ExtendedData = JsonSerializer.SerializeToElement(new { series_type = type }),
+        };
+    }
 }

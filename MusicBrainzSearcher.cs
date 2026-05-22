@@ -133,4 +133,35 @@ internal static class MusicBrainzSearcher
         if (string.IsNullOrEmpty(date)) return null;
         return int.TryParse(date[..Math.Min(4, date.Length)], out var y) ? y : null;
     }
+
+    /// <summary>
+    /// Searches MusicBrainz for audiobook series by name.
+    /// Returns an empty-results <see cref="MediaMetadata"/> (not an exception) when nothing is found
+    /// — the caller gracefully falls back so the book lands at level 1 under its author.
+    /// </summary>
+    public static async Task<MediaMetadata> SearchAudiobookSeriesAsync(
+        MusicBrainzClient client, string query, CancellationToken ct)
+    {
+        try
+        {
+            var encoded = Uri.EscapeDataString(query);
+            var json = await client.GetAsync($"series?query={encoded}&limit=10&fmt=json", ct);
+            var result = JsonSerializer.Deserialize<MbSeriesSearchResult>(json, MusicBrainzJsonOptions.Opts);
+            var items = (result?.Series ?? [])
+                .Select(s => new MediaMetadata
+                {
+                    ExternalId = $"series:{s.Id}",
+                    Source     = "MusicBrainz",
+                    Title      = s.Name ?? string.Empty,
+                })
+                .ToList();
+            return new MediaMetadata { Results = items, TotalResults = result?.Count ?? 0 };
+        }
+        catch
+        {
+            // MusicBrainz series coverage for audiobooks is incomplete.
+            // Silently return empty rather than propagating the error.
+            return new MediaMetadata();
+        }
+    }
 }

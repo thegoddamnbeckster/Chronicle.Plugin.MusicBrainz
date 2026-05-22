@@ -195,6 +195,20 @@ public class MbSearchResult<T>
     [JsonPropertyName("recordings")]     public List<T>? Recordings { get; set; }
 }
 
+// Series search result (audiobook series, nice-to-have)
+public class MbSeriesSearchResult
+{
+    [JsonPropertyName("count")]  public int Count { get; set; }
+    [JsonPropertyName("series")] public List<MbSeries>? Series { get; set; }
+}
+
+public class MbSeries
+{
+    [JsonPropertyName("id")]   public string? Id   { get; set; }
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    [JsonPropertyName("type")] public string? Type { get; set; }
+}
+
 // Converter that reads a JSON value as a string regardless of whether the token
 // is a number or a quoted string — needed because Cover Art Archive image IDs
 // are returned as bare JSON numbers that exceed Int64 range.
