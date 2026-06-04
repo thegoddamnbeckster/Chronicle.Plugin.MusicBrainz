@@ -21,7 +21,10 @@ internal static class MusicBrainzSearcher
                 Source     = "MusicBrainz",
                 Title      = a.Name ?? string.Empty,
                 Overview   = BuildArtistSummary(a),
-                Year       = ParseYear(a.LifeSpan?.Begin)
+                Year       = ParseYear(a.LifeSpan?.Begin),
+                // Carry disambiguation and MusicBrainz tags forward so ScoreCandidate
+                // can apply context-aware boosts/penalties (author vs musician).
+                Tags       = BuildCandidateTags(a),
             }).ToList();
         return new MediaMetadata { Results = items, TotalResults = result?.Count ?? 0 };
     }
@@ -90,6 +93,21 @@ internal static class MusicBrainzSearcher
                 if (rel.Id is not null && rel.Title is not null)
                     pairs.Add((rel.Id, rel.Title));
         return pairs;
+    }
+
+    /// <summary>
+    /// Collects tags that ScoreCandidate uses to boost/penalise the candidate.
+    /// Includes the MusicBrainz disambiguation string (lowercased) and any MB tag names.
+    /// </summary>
+    private static List<string>? BuildCandidateTags(MbArtist a)
+    {
+        var tags = new List<string>();
+        if (!string.IsNullOrWhiteSpace(a.Disambiguation))
+            tags.Add(a.Disambiguation.ToLowerInvariant());
+        if (a.Tags is not null)
+            tags.AddRange(a.Tags.Select(t => t.Name?.ToLowerInvariant() ?? string.Empty)
+                                .Where(t => t.Length > 0));
+        return tags.Count > 0 ? tags : null;
     }
 
     private static string? BuildArtistSummary(MbArtist a)

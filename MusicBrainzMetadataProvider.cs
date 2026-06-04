@@ -643,6 +643,29 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             }
         }
 
+        // ── Context-aware author/musician disambiguation ──────────────────────
+        // When enriching an author-level item (audiobooks/books, hierarchy 0),
+        // boost candidates that look like authors and penalise those that look
+        // like musicians. Uses the disambiguation string and MusicBrainz tags
+        // that were stored in candidate.Tags by the searcher.
+        if (ctx.MediaTypeName is "audiobooks" or "books" && ctx.HierarchyLevel == 0
+            && candidate.Tags is { Count: > 0 })
+        {
+            var tagText = string.Join(" ", candidate.Tags).ToLowerInvariant();
+
+            bool looksLikeAuthor = tagText.Contains("author") || tagText.Contains("writer")
+                                || tagText.Contains("novelist") || tagText.Contains("poet");
+            bool looksLikeMusician = tagText.Contains("vocalist") || tagText.Contains("singer")
+                                  || tagText.Contains("musician") || tagText.Contains("rapper")
+                                  || tagText.Contains("guitarist") || tagText.Contains("drummer")
+                                  || tagText.Contains("bassist")   || tagText.Contains("pianist")
+                                  || tagText.Contains("dj ")       || tagText.Contains("band")
+                                  || tagText.Contains("orchestra") || tagText.Contains("choir");
+
+            if (looksLikeAuthor)    { score += 30; reasons.Add("author context boost"); }
+            if (looksLikeMusician)  { score -= 40; reasons.Add("musician context penalty"); }
+        }
+
         return new ScoredCandidate(candidate, score,
             reasons.Count > 0 ? string.Join(", ", reasons) : "no signals");
     }
