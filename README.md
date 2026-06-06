@@ -52,11 +52,31 @@ Fix Match accepts MusicBrainz URLs:
 
 > **Rate limiting:** MusicBrainz allows ~1 request/second for anonymous clients.
 
+## Deploying
+
+```powershell
+$pluginDir = "..\Chronicle\src\Chronicle.API\plugins\chronicle.plugin.musicbrainz"
+New-Item -ItemType Directory -Force $pluginDir
+dotnet build -c Release
+Copy-Item "bin\Release\net9.0\*.dll" $pluginDir
+Copy-Item "manifest.json"           $pluginDir
+```
+
 ## Development
+
+Both repositories must be cloned as siblings for the project reference to resolve:
+
+```
+<base>\
+  Chronicle\
+  Chronicle.Plugin.MusicBrainz\
+```
+
+The plugin references `Chronicle.Plugins` via a local project reference:
 
 ```xml
 <ProjectReference Include="..\Chronicle\src\Chronicle.Plugins\Chronicle.Plugins.csproj"
                   Private="false" ExcludeAssets="runtime" />
 ```
 
-`Chronicle.Plugins.dll` must **not** be copied to the plugin output directory — the host provides it.
+> **Important:** `Chronicle.Plugins.dll` must **not** be in the plugin output directory — the Chronicle host provides it. `<Private>false</Private>` prevents it from being copied.
