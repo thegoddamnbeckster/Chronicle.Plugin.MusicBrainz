@@ -749,12 +749,13 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
     /// </summary>
     private static string NormalizeUrl(string url)
     {
-        Uri uri;
-        try { uri = new Uri(url); }
-        catch (UriFormatException)
-        {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
             throw new ArgumentException($"Cannot parse MusicBrainz URL: '{url}'");
-        }
+
+        if (!uri.Host.Equals("musicbrainz.org", StringComparison.OrdinalIgnoreCase) &&
+            !uri.Host.EndsWith(".musicbrainz.org", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                $"URL is not a musicbrainz.org address: '{url}'");
 
         // AbsolutePath: /artist/5b11f4ce-a62d-471e-81fc-a69a8278c7da
         var segments = uri.AbsolutePath.Trim('/').Split('/');
