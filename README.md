@@ -1,5 +1,7 @@
 # Chronicle.Plugin.MusicBrainz
 
+[![Latest Release](https://img.shields.io/github/v/release/thegoddamnbeckster/Chronicle.Plugin.MusicBrainz?label=Chronicle.Plugin.MusicBrainz&color=ba478f)](https://github.com/thegoddamnbeckster/Chronicle.Plugin.MusicBrainz/releases/latest)
+
 MusicBrainz metadata provider plugin for [Chronicle](https://github.com/thegoddamnbeckster/Chronicle).
 
 Fetches music metadata — albums, artists, genres, track listings, and cover art — from [MusicBrainz](https://musicbrainz.org/) and the [Cover Art Archive](https://coverartarchive.org/). **No API key required.**
