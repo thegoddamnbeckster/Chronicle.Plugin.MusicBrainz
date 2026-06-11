@@ -570,7 +570,8 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
         // Lucene would mis-parse as an operator (parentheses, dots, colons, etc.).
         // Parentheses are NOT stripped — inside a quoted phrase they are literals and
         // preserve the full title (e.g. "Duck and Run (LP version)").
-        var needsQuotes = s.Any(c => c == ' ' || (!char.IsLetterOrDigit(c) && c != '-'));
+        // Hyphens are NOT excluded — Lucene parses "a-ha" as "a AND NOT ha" without quotes.
+        var needsQuotes = s.Any(c => !char.IsLetterOrDigit(c));
         return needsQuotes ? $"\"{s.Replace("\"", "\\\"")}\"" : s;
     }
 
