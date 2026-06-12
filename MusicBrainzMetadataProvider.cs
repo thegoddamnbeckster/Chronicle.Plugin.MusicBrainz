@@ -152,12 +152,36 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
             ? context.AltTitles
             : (IReadOnlyList<string>)[context.Name];
 
-        var year      = context.Year;
-        var container = await RunCascadeAsync(context, titles, year, ct);
+        var year = context.Year;
 
-        var candidates = (container.Results ?? [])
+        // For an open Add Media search (music, level 0, no parent context), run artist and
+        // album (release-group) searches in parallel so the user gets results with cover art
+        // and rich metadata alongside the artist stubs.
+        bool isMusicOpenSearch = !string.Equals(
+                context.MediaTypeName, "audiobooks", StringComparison.OrdinalIgnoreCase)
+            && context.HierarchyLevel == 0
+            && context.ParentName is null;
+
+        IReadOnlyList<MediaMetadata> allContainers;
+        if (isMusicOpenSearch)
+        {
+            var artistTask = RunCascadeAsync(context, titles, year, ct);
+            var albumQuery = string.Join(" ", titles.Take(1));
+            var albumTask  = MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, albumQuery, ct);
+            await Task.WhenAll(artistTask, albumTask);
+            var albumMeta = albumTask.Result;
+            allContainers = [artistTask.Result, albumMeta];
+        }
+        else
+        {
+            allContainers = [await RunCascadeAsync(context, titles, year, ct)];
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var candidates = allContainers
+            .SelectMany(c => c.Results ?? [])
             .Select(r => ScoreCandidate(context, r))
-            .Where(c => !string.IsNullOrEmpty(c.Metadata.ExternalId))
+            .Where(c => !string.IsNullOrEmpty(c.Metadata.ExternalId) && seen.Add(c.Metadata.ExternalId!))
             .OrderByDescending(c => c.Score)
             .Take(10)
             .ToList();
