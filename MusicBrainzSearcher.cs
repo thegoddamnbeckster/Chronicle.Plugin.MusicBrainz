@@ -14,7 +14,7 @@ internal static class MusicBrainzSearcher
         var json = await client.GetAsync($"artist?query={encoded}&limit=10&fmt=json", ct);
         var result = JsonSerializer.Deserialize<MbSearchResult<MbArtist>>(json, MusicBrainzJsonOptions.Opts);
         var items = (result?.Artists ?? [])
-            .Where(a => !personOnly || IsPersonArtistType(a.Type))
+            .Where(a => !personOnly || (IsPersonArtistType(a.Type) && !HasMusicalGroupName(a.Name)))
             .Select(a => new MediaMetadata
             {
                 ExternalId = $"artist:{a.Id}",
@@ -38,6 +38,18 @@ internal static class MusicBrainzSearcher
     private static bool IsPersonArtistType(string? type) =>
         string.IsNullOrEmpty(type) ||
         string.Equals(type, "Person", StringComparison.OrdinalIgnoreCase);
+
+    // Words that unambiguously identify a musical ensemble in an artist name.
+    // Used to reject null-typed MusicBrainz entries that evade the Type filter.
+    private static readonly string[] _musicalGroupWords =
+    [
+        "ensemble", "orchestra", "philharmonic", "symphony", "quartet", "quintet",
+        "sextet", "septet", "octet", "choir", "chorus", "band", "trio ",
+    ];
+
+    private static bool HasMusicalGroupName(string? name) =>
+        name is not null &&
+        _musicalGroupWords.Any(w => name.Contains(w, StringComparison.OrdinalIgnoreCase));
 
     public static async Task<MediaMetadata> SearchReleaseGroupsAsync(
         MusicBrainzClient client, string query, CancellationToken ct)
