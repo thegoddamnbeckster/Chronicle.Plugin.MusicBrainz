@@ -62,11 +62,15 @@ internal static class MusicBrainzEntityFetcher
             .Select(i => i.Image)
             .FirstOrDefault();
 
-        // Cast: band members (from artist-to-artist relations)
+        // Cast: band members (from artist-to-artist relations). MBID was already being
+        // fetched/parsed here and then discarded before this fix (docs/plans/2026-08-28-
+        // people-section-design.md Section 4.2) -- DistinctBy name keeps the first MBID seen
+        // for a given name, same dedup semantics the previous name-only Distinct() had.
         var members = (artist.Relations ?? [])
             .Where(r => r.Type == "member of band" && r.Artist?.Name is not null)
-            .Select(r => r.Artist!.Name!)
-            .Distinct()
+            .DistinctBy(r => r.Artist!.Name)
+            .Select(r => new CastMember(r.Artist!.Name!,
+                ExternalPersonId: r.Artist!.Id is null ? null : $"musicbrainz:{r.Artist!.Id}"))
             .ToList();
 
         // Tags: community folksonomy tags, ordered by vote count
@@ -139,12 +143,15 @@ internal static class MusicBrainzEntityFetcher
 
         // Full release details (track listings, labels, barcodes, media) for up to 20 releases
         var releases = new List<object>();
+        string? firstLabel = null;
         foreach (var release in (rg.Releases ?? []).Take(20))
         {
             if (release.Id is null) continue;
             var releaseJson = await client.GetAsync($"release/{release.Id}?inc={ReleaseIncludes}&fmt=json", ct);
             var full = JsonSerializer.Deserialize<MbRelease>(releaseJson, MusicBrainzJsonOptions.Opts);
-            if (full is not null) releases.Add(MapRelease(full));
+            if (full is null) continue;
+            releases.Add(MapRelease(full));
+            firstLabel ??= full.LabelInfo?.Select(li => li.Label?.Name).FirstOrDefault(n => n is not null);
         }
 
         // Cover art: try release-group level first (preferred, single canonical image set).
@@ -170,10 +177,11 @@ internal static class MusicBrainzEntityFetcher
 
         var additionalImages = BuildAdditionalImages(images);
 
-        // Cast: credited artist names
+        // Cast: credited artist names. ac.Artist?.Id (the MBID) was already parsed here too.
         var creditedArtists = (rg.ArtistCredit ?? [])
-            .Select(ac => ac.Name ?? ac.Artist?.Name ?? "")
-            .Where(n => n != "")
+            .Where(ac => (ac.Name ?? ac.Artist?.Name ?? "") != "")
+            .Select(ac => new CastMember(ac.Name ?? ac.Artist!.Name!,
+                ExternalPersonId: ac.Artist?.Id is null ? null : $"musicbrainz:{ac.Artist.Id}"))
             .ToList();
 
         // Tags
@@ -188,7 +196,7 @@ internal static class MusicBrainzEntityFetcher
         var overviewParts = new List<string>();
         if (!string.IsNullOrEmpty(rg.PrimaryType))    overviewParts.Add(rg.PrimaryType);
         if (rg.SecondaryTypes is { Count: > 0 })       overviewParts.AddRange(rg.SecondaryTypes);
-        if (creditedArtists.Count > 0)                 overviewParts.Add($"by {string.Join(", ", creditedArtists)}");
+        if (creditedArtists.Count > 0)                 overviewParts.Add($"by {string.Join(", ", creditedArtists.Select(c => c.Name))}");
         if (!string.IsNullOrEmpty(rg.Disambiguation))  overviewParts.Add($"({rg.Disambiguation})");
         var overview = overviewParts.Count > 0 ? string.Join(" · ", overviewParts) : null;
 
@@ -203,6 +211,11 @@ internal static class MusicBrainzEntityFetcher
             externalUrls   = externalUrls,
             releases       = releases,
             coverArt       = CoverArtArchiveClient.ToStorageFormat(images),
+            // "label" is the canonical singular key MetadataResolutionService.FieldMap reads
+            // (see also FanartTvMetadataProvider/ResolvedMetadataDto) -- releases[].labelInfo
+            // above keeps the full per-release detail, this is just the first label found so
+            // the generic "label" field actually gets a value instead of sitting empty.
+            label          = firstLabel,
         });
 
         return new MediaMetadata
@@ -234,9 +247,9 @@ internal static class MusicBrainzEntityFetcher
 
         // Fetch linked works (compositions) and extract composer/lyricist/arranger credits
         var works      = new List<object>();
-        var composers  = new List<string>();
-        var lyricists  = new List<string>();
-        var arrangers  = new List<string>();
+        var composers  = new List<(string Name, string? Mbid)>();
+        var lyricists  = new List<(string Name, string? Mbid)>();
+        var arrangers  = new List<(string Name, string? Mbid)>();
         foreach (var rel in (rec.Relations ?? []).Where(r => r.Work is not null).Take(3))
         {
             if (rel.Work?.Id is null) continue;
@@ -245,15 +258,17 @@ internal static class MusicBrainzEntityFetcher
             if (work is not null)
             {
                 works.Add(MapWork(work));
+                // r.Artist.Id (the MBID) was already parsed here too, then discarded before
+                // this fix (docs/plans/2026-08-28-people-section-design.md Section 4.2).
                 composers.AddRange((work.Relations ?? [])
                     .Where(r => r.Type == "composer"  && r.Artist?.Name is not null)
-                    .Select(r => r.Artist!.Name!));
+                    .Select(r => (r.Artist!.Name!, r.Artist!.Id)));
                 lyricists.AddRange((work.Relations ?? [])
                     .Where(r => r.Type == "lyricist"  && r.Artist?.Name is not null)
-                    .Select(r => r.Artist!.Name!));
+                    .Select(r => (r.Artist!.Name!, r.Artist!.Id)));
                 arrangers.AddRange((work.Relations ?? [])
                     .Where(r => r.Type == "arranger"  && r.Artist?.Name is not null)
-                    .Select(r => r.Artist!.Name!));
+                    .Select(r => (r.Artist!.Name!, r.Artist!.Id)));
             }
         }
 
@@ -279,14 +294,23 @@ internal static class MusicBrainzEntityFetcher
 
         var additionalImages = BuildAdditionalImages(allCoverImages);
 
-        // Cast: credited artist names on the recording
+        // Cast: credited artist names on the recording. ac.Artist?.Id (the MBID) was already
+        // parsed here too.
         var creditedArtists = (rec.ArtistCredit ?? [])
-            .Select(ac => ac.Name ?? ac.Artist?.Name ?? "")
-            .Where(n => n != "")
+            .Where(ac => (ac.Name ?? ac.Artist?.Name ?? "") != "")
+            .Select(ac => new CastMember(ac.Name ?? ac.Artist!.Name!,
+                ExternalPersonId: ac.Artist?.Id is null ? null : $"musicbrainz:{ac.Artist.Id}"))
             .ToList();
 
-        // Directors: composers and lyricists (music equivalent of directors/writers)
-        var directors = composers.Concat(lyricists).Distinct().ToList();
+        // Crew: composers, lyricists and arrangers -- the music equivalent of director/writer
+        // credits. Kept as distinct roles rather than merged into one undifferentiated list.
+        var crew = composers.Select(c => new CrewMember(c.Name, "Composer",
+                ExternalPersonId: c.Mbid is null ? null : $"musicbrainz:{c.Mbid}"))
+            .Concat(lyricists.Select(c => new CrewMember(c.Name, "Lyricist",
+                ExternalPersonId: c.Mbid is null ? null : $"musicbrainz:{c.Mbid}")))
+            .Concat(arrangers.Select(c => new CrewMember(c.Name, "Arranger",
+                ExternalPersonId: c.Mbid is null ? null : $"musicbrainz:{c.Mbid}")))
+            .ToList();
 
         // Tags
         var tags = (rec.Tags ?? [])
@@ -303,6 +327,10 @@ internal static class MusicBrainzEntityFetcher
             disambiguation = rec.Disambiguation,
             video          = rec.Video,
             isrcs          = rec.Isrcs ?? [],
+            // "isrc" is the canonical singular key MetadataResolutionService.FieldMap reads --
+            // isrcs above keeps every ISRC this recording has, this is just the first one so
+            // the generic "isrc" field actually gets a value.
+            isrc           = rec.Isrcs?.FirstOrDefault(),
             artistCredit   = MapArtistCredit(rec.ArtistCredit),
             composers      = composers.Distinct().ToList(),
             lyricists      = lyricists.Distinct().ToList(),
@@ -331,7 +359,7 @@ internal static class MusicBrainzEntityFetcher
             RuntimeMinutes   = rec.Length.HasValue ? (int)Math.Round(rec.Length.Value / 60000.0) : null,
             Genres           = (rec.Genres ?? []).Select(g => g.Name ?? "").Where(g => g != "").ToList(),
             Cast             = creditedArtists,
-            Directors        = directors,
+            Crew             = crew,
             Tags             = tags,
             Rating           = rec.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
             AdditionalImages = additionalImages,
