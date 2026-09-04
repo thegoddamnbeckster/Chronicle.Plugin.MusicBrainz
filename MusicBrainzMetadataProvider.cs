@@ -156,17 +156,20 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider
 
         // For an open Add Media search (music, level 0, no parent context), run artist and
         // album (release-group) searches in parallel so the user gets results with cover art
-        // and rich metadata alongside the artist stubs.
+        // and rich metadata alongside the artist stubs. ChildNames is only populated when
+        // enriching an artist that already exists in Chronicle, not during a fresh Add Media
+        // search, so its presence rules out the album branch for that case.
         bool isMusicOpenSearch = !string.Equals(
                 context.MediaTypeName, "audiobooks", StringComparison.OrdinalIgnoreCase)
             && context.HierarchyLevel == 0
-            && context.ParentName is null;
+            && context.ParentName is null
+            && (context.ChildNames is null || context.ChildNames.Count == 0);
 
         IReadOnlyList<MediaMetadata> allContainers;
         if (isMusicOpenSearch)
         {
             var artistTask = RunCascadeAsync(context, titles, year, ct);
-            var albumQuery = string.Join(" ", titles.Take(1));
+            var albumQuery = MbSanitize(string.Join(" ", titles.Take(1)));
             var albumTask  = MusicBrainzSearcher.SearchReleaseGroupsAsync(_client!, albumQuery, ct);
             await Task.WhenAll(artistTask, albumTask);
             var albumMeta = albumTask.Result;
