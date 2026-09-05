@@ -87,6 +87,18 @@ internal static class MusicBrainzEntityFetcher
         // External URLs (Wikipedia, Wikidata, Discogs, social media, etc.)
         var externalUrls = ExtractExternalUrls(artist.Relations);
 
+        // A solo artist is a real individual -- MusicBrainz's own LifeSpan is their literal
+        // birth/death, and Chronicle's generic resolution (MetadataResolutionService's
+        // TryGetBlobProperty, which falls back into "extendedData" for exactly this reason --
+        // see the Wikipedia plugin's own birthDate/deathDate comment for the field-name
+        // precedent) promotes birthDate/deathDate from ANY plugin's blob onto MediaItem's own
+        // columns, which is what drives the "deceased" badge already shown for "people"-type
+        // items. For a Group/Orchestra/Choir/etc., LifeSpan.Begin/End are formation/
+        // disbandment dates, not a person's birth/death -- must never be reported as such, or
+        // a disbanded band would incorrectly show as "deceased".
+        var isPerson = string.IsNullOrEmpty(artist.Type) ||
+            string.Equals(artist.Type, "Person", StringComparison.OrdinalIgnoreCase);
+
         // ExtendedData: everything that doesn't fit the generic MediaMetadata fields
         var extendedData = JsonSerializer.SerializeToElement(new
         {
@@ -101,6 +113,8 @@ internal static class MusicBrainzEntityFetcher
                 end    = artist.LifeSpan.End,
                 ended  = artist.LifeSpan.Ended,
             },
+            birthDate      = isPerson ? artist.LifeSpan?.Begin : null,
+            deathDate      = isPerson && artist.LifeSpan?.Ended == true ? artist.LifeSpan?.End : null,
             disambiguation = artist.Disambiguation,
             sortName       = artist.SortName,
             aliases        = (artist.Aliases ?? [])
