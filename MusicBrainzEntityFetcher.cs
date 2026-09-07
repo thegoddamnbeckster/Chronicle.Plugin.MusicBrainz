@@ -155,10 +155,19 @@ internal static class MusicBrainzEntityFetcher
         var rg = JsonSerializer.Deserialize<MbReleaseGroup>(json, MusicBrainzJsonOptions.Opts)
             ?? throw new InvalidOperationException($"Empty response for release-group {mbid}");
 
-        // Full release details (track listings, labels, barcodes, media) for up to 20 releases
+        // Full release details (track listings, labels, barcodes, media) for a handful of
+        // releases. Deliberately capped low (was 20): each iteration is its own throttled
+        // round trip through MusicBrainzClient's global 1 req/sec (anonymous) limiter, so a
+        // release-group with many editions/reissues turned a single GetByIdAsync into 20+
+        // serial requests -- comfortably blowing past Chronicle's own 25s ProviderCallGuard
+        // ceiling (confirmed live: nearly every enrichment call was hitting that timeout,
+        // silently dropping this entire detail fetch on the floor every time it happened).
+        // A handful of releases is enough to populate label/track-listing data for the
+        // ExtendedData.releases blob without turning routine enrichment into a multi-minute
+        // operation -- this was never load-bearing for matching, only supplemental detail.
         var releases = new List<object>();
         string? firstLabel = null;
-        foreach (var release in (rg.Releases ?? []).Take(20))
+        foreach (var release in (rg.Releases ?? []).Take(3))
         {
             if (release.Id is null) continue;
             var releaseJson = await client.GetAsync($"release/{release.Id}?inc={ReleaseIncludes}&fmt=json", ct);

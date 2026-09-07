@@ -1,7 +1,7 @@
 {
   "plugin_id": "chronicle.plugin.musicbrainz",
   "name": "MusicBrainz",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "author": "Chronicle Contributors",
   "description": "Fetches comprehensive music metadata from MusicBrainz (artist, album, track) and cover art from the Cover Art Archive. No API key required.",
   "fixMatchHint": "Enter a MusicBrainz URL (e.g. https://musicbrainz.org/artist/…) or typed ID (artist:…, release-group:…, recording:…)",
@@ -15,7 +15,7 @@
       "task_id":         "fetch-missing-metadata",
       "display_name":    "Fetch Missing Metadata",
       "description":     "Looks up metadata from MusicBrainz for newly imported artists, albums, and tracks that don't have it yet.",
-      "default_cron":    "0 4 * * *",
+      "default_cron":    "*/15 * * * *",
       "default_enabled": true
     },
     {
