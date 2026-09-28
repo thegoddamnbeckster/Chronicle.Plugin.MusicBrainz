@@ -4,7 +4,16 @@ namespace Chronicle.Plugin.MusicBrainz;
 
 /// <summary>
 /// Thread-safe MusicBrainz API client with built-in rate limiting.
-/// Anonymous: 1 req/sec. Authenticated (HTTP Digest): 5 req/sec.
+///
+/// Root-caused live (2026-09-28): this used to pace authenticated requests at 240ms (~4.2/s),
+/// on the assumption that logging in raised the allowed rate the way it does for some other
+/// APIs. MusicBrainz's own published rate-limiting docs
+/// (musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting) say otherwise: the enforced limit is "on
+/// average 1 request per second" PER IP ADDRESS, all-or-nothing ("we decline 100% of [requests],
+/// until the rate drops to 1 per second or lower") -- with no mention of authentication raising
+/// that ceiling for a generic client. The only higher-throughput carve-out named in that doc is
+/// for a short list of specific, individually-recognized applications ("Headphones, beets"),
+/// not "any authenticated request." So both modes now pace the same, conservative interval.
 /// </summary>
 internal sealed class MusicBrainzClient : IDisposable
 {
@@ -18,9 +27,10 @@ internal sealed class MusicBrainzClient : IDisposable
 
     public MusicBrainzClient(string userAgent, string? username, string? password)
     {
-        _minInterval = string.IsNullOrEmpty(username)
-            ? TimeSpan.FromMilliseconds(1200)   // 1 req/sec anonymous  (+20% over limit)
-            : TimeSpan.FromMilliseconds(240);   // 5 req/sec authenticated (+20% over limit)
+        // ~0.91 req/s -- under MusicBrainz's documented 1 req/s-per-IP limit regardless of
+        // whether this client authenticates (see this class's own doc for why authentication
+        // does not raise the limit here).
+        _minInterval = TimeSpan.FromMilliseconds(1100);
 
         var handler = new HttpClientHandler();
         if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
@@ -41,6 +51,9 @@ internal sealed class MusicBrainzClient : IDisposable
         _http        = http;
         _minInterval = minInterval;
     }
+
+    /// <summary>Test-only visibility into the pacing interval the production constructor chose.</summary>
+    internal TimeSpan MinInterval => _minInterval;
 
     /// <summary>GET MusicBrainz API path (auto-throttled, retries on 503 and 200+error body).</summary>
     public async Task<string> GetAsync(string path, CancellationToken ct = default)

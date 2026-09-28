@@ -106,6 +106,36 @@ public class MusicBrainzClientTests
         Assert.Equal(json, result);
         Assert.Equal(1, handler.CallCount); // no retries needed
     }
+
+    // ── Rate-limit pacing ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Root-caused live (2026-09-28): the production constructor used to pace authenticated
+    /// requests at 240ms (~4.2 req/s), on the mistaken assumption that logging in raises
+    /// MusicBrainz's per-IP limit. MusicBrainz's own published rate-limiting docs say the
+    /// enforced limit is 1 req/s PER IP, all-or-nothing, regardless of authentication -- so both
+    /// modes must pace at (or under) that same rate.
+    /// </summary>
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("someuser", "somepass")]
+    public void ProductionConstructor_PacesAtOrUnderOneRequestPerSecond_RegardlessOfAuthentication(
+        string? username, string? password)
+    {
+        var client = new MusicBrainzClient("Chronicle/1.0 (test)", username, password);
+
+        Assert.True(client.MinInterval >= TimeSpan.FromSeconds(1),
+            $"Expected at least a 1s interval (MusicBrainz's own 1 req/s-per-IP limit), got {client.MinInterval}.");
+    }
+
+    [Fact]
+    public void ProductionConstructor_PacesTheSame_AuthenticatedOrNot()
+    {
+        var anonymous     = new MusicBrainzClient("Chronicle/1.0 (test)", null, null);
+        var authenticated = new MusicBrainzClient("Chronicle/1.0 (test)", "someuser", "somepass");
+
+        Assert.Equal(anonymous.MinInterval, authenticated.MinInterval);
+    }
 }
 
 /// <summary>Minimal HttpMessageHandler stub for unit tests.</summary>
