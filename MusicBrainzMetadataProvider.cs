@@ -7,11 +7,27 @@ namespace Chronicle.Plugin.MusicBrainz;
 /// Chronicle metadata provider for MusicBrainz.
 /// Supports "music" (Artist → Album → Track hierarchy) and "audiobooks" media types.
 /// </summary>
-public sealed class MusicBrainzMetadataProvider : IMetadataProvider
+public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalIdPolicyProvider
 {
     // ── IMetadataProvider identity ────────────────────────────────────────────
 
     public string PluginId => "chronicle.plugin.musicbrainz";
+
+    /// <summary>
+    /// MusicBrainz ids are "{entity}:{mbid}". An artist sits at the top, a release group (album) below it, a recording (track)
+    /// below that; a bare release is never stored on a library item. Which kind of item each can sit on is declared here.
+    /// </summary>
+    public ExternalIdPolicy GetExternalIdPolicy() => new()
+    {
+        Source = "musicbrainz",
+        IdShapes =
+        [
+            new() { Pattern = "^artist:", Depths = [0], ItemFamilies = ["music"] },
+            new() { Pattern = "^release-group:", Depths = [1] },
+            new() { Pattern = "^recording:", Depths = [2] },
+            new() { Pattern = "^release:", Depths = [] },
+        ],
+    };
     public string Name     => "MusicBrainz";
     public string Version  => "1.0.4";
     public string Author   => "Chronicle Contributors";
