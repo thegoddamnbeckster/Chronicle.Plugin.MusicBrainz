@@ -7,6 +7,9 @@
   "fixMatchHint": "Enter a MusicBrainz URL (e.g. https://musicbrainz.org/artist/…) or typed ID (artist:…, release-group:…, recording:…)",
   "min_chronicle_version": "0.1.0",
   "entry_type": "Chronicle.Plugin.MusicBrainz.MusicBrainzMetadataProvider",
+  "sourceUrls": [
+    { "match": "^(artist|series|release-group|release|recording|work|label|event|place|area|instrument):([0-9a-f\\-]{36})$", "url": "https://musicbrainz.org/$1/$2" }
+  ],
   "iconUrl": "https://musicbrainz.org/favicon.ico",
   "brandColorLight": "#BA478F",
   "brandColorDark":  "#CF6BAA",
