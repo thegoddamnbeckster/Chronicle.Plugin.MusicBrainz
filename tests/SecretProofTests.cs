@@ -34,19 +34,19 @@ public class SecretProofTests
     [InlineData(HttpStatusCode.TooManyRequests)]
     public async Task A_failing_call_leaves_the_account_out_of_the_error(HttpStatusCode code)
     {
-        const string User = "SECRET-USER-1234567890";
-        const string Pass = "SECRET-PASS-0987654321";
+        const string Username = "SECRET-USER-1234567890";
+        const string Password = "SECRET-PASS-0987654321";
         var h = new Handler(_ =>
         {
             var r = new HttpResponseMessage(code);
             r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(1));
             return r;
         });
-        var client = new MusicBrainzClient("Chronicle-Test/1.0", User, Pass, h) { MaxRetries = 1 };
+        var client = new MusicBrainzClient("Chronicle-Test/1.0", Username, Password, h) { MaxRetries = 1 };
         var ex = await Record.ExceptionAsync(() => client.GetAsync("artist/x", default));
         Assert.NotNull(ex);
-        Assert.DoesNotContain(User, ex!.ToString());
-        Assert.DoesNotContain(Pass, ex.ToString());
+        Assert.DoesNotContain(Username, ex!.ToString());
+        Assert.DoesNotContain(Password, ex.ToString());
     }
 
     [Theory]
