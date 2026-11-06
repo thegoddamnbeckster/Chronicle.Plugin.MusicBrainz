@@ -25,6 +25,9 @@ internal sealed class MusicBrainzClient : IDisposable
     private DateTime _lastRequest = DateTime.MinValue;
     private readonly TimeSpan _minInterval;
 
+    /// <summary>How many times a rate-limited or error-bodied answer is retried before giving up (from the Max Retries setting).</summary>
+    public int MaxRetries { get; set; } = 4;
+
     public MusicBrainzClient(string userAgent, string? username, string? password)
     {
         // ~0.91 req/s -- under MusicBrainz's documented 1 req/s-per-IP limit regardless of
@@ -42,7 +45,7 @@ internal sealed class MusicBrainzClient : IDisposable
         _http = new HttpClient(handler);
         _http.DefaultRequestHeaders.Add("User-Agent", userAgent);
         _http.DefaultRequestHeaders.Add("Accept", "application/json");
-        _http.Timeout = TimeSpan.FromSeconds(90);
+        _http.Timeout = TimeSpan.FromSeconds(25);   // the host gives a call 25 s; waiting longer only holds the connection after it has gone
     }
 
     /// <summary>Test-only constructor that accepts a pre-built HttpClient and throttle interval.</summary>
@@ -58,7 +61,7 @@ internal sealed class MusicBrainzClient : IDisposable
     /// <summary>GET MusicBrainz API path (auto-throttled, retries on 503 and 200+error body).</summary>
     public async Task<string> GetAsync(string path, CancellationToken ct = default)
     {
-        const int maxRetries = 4;
+        var maxRetries = MaxRetries;
         var delay = TimeSpan.FromSeconds(2);
 
         for (int attempt = 0; ; attempt++)
@@ -69,8 +72,14 @@ internal sealed class MusicBrainzClient : IDisposable
                 : $"{BaseUrl}/{path.TrimStart('/')}";
             var response = await _http.GetAsync(url, ct);
 
-            if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable && attempt < maxRetries)
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                throw new Chronicle.Plugins.PluginAuthException("chronicle.plugin.musicbrainz",
+                    "MusicBrainz rejected the account in the plugin settings. Check the username and password, or clear both to browse anonymously.");
+
+            if (response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests && attempt < maxRetries)
             {
+                // Honour the server's own Retry-After when it sends one (capped), otherwise the doubling back-off below.
+                if (response.Headers.RetryAfter?.Delta is { } ra && ra > TimeSpan.Zero) delay = ra > TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(30) : ra;
                 // MusicBrainz returns 503 when we exceed the rate limit.
                 // Back off and retry; the backoff also resets _lastRequest so the
                 // next ThrottleAsync interval starts fresh.
@@ -78,6 +87,11 @@ internal sealed class MusicBrainzClient : IDisposable
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
                 continue;
             }
+
+            // Out of retries while MusicBrainz is still saying "slow down": report it as a rate limit so the host pauses the pass
+            // instead of counting it as this item's failure.
+            if (response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests)
+                throw new HttpRequestException("MusicBrainz is rate limiting requests", null, System.Net.HttpStatusCode.TooManyRequests);
 
             response.EnsureSuccessStatusCode();
             var content = await response.Content.ReadAsStringAsync(ct);

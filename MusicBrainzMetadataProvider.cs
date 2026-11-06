@@ -100,7 +100,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
             {
                 Key          = KeyUsername,
                 Label        = "MusicBrainz Username",
-                Description  = "Optional. Enables authenticated access for higher rate limits.",
+                Description  = "Optional. Signs requests in with your MusicBrainz account. It does NOT raise the rate limit (MusicBrainz allows about one request a second per address either way), so leave it blank unless you have a reason. Needs the password below.",
                 Type         = SettingType.Text,
                 Required     = false,
             },
@@ -108,6 +108,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
             {
                 Key      = KeyPassword,
                 Label    = "MusicBrainz Password",
+                Description = "Only needed together with the username above; leave both blank to browse anonymously. Stored hidden and never shown again.",
                 Type     = SettingType.Password,
                 Required = false,
             },
@@ -115,9 +116,10 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
             {
                 Key          = KeyMaxRetries,
                 Label        = "Max Retries",
+                Description  = "How many times to try again when MusicBrainz says to slow down (0 to 8). Each retry waits longer than the last. Leave at 4 unless you see rate-limit errors.",
                 Type         = SettingType.Number,
                 Required     = false,
-                DefaultValue = "3",
+                DefaultValue = "4",
             },
             new SettingDefinition
             {
@@ -142,7 +144,10 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
         var password  = settings.GetValueOrDefault(KeyPassword);
 
         _client?.Dispose();
-        _client = new MusicBrainzClient(userAgent, username, password);
+        _client = new MusicBrainzClient(userAgent, username, password)
+        {
+            MaxRetries = int.TryParse(settings.GetValueOrDefault(KeyMaxRetries), out var retries) ? Math.Clamp(retries, 0, 8) : 4,
+        };
     }
 
     // ── IMetadataProvider: search ─────────────────────────────────────────────
