@@ -74,7 +74,7 @@ internal sealed class MusicBrainzClient : IDisposable
 
             if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 throw new Chronicle.Plugins.PluginAuthException("chronicle.plugin.musicbrainz",
-                    "MusicBrainz rejected the account in the plugin settings. Check the username and password, or clear both to browse anonymously.");
+                    "MusicBrainz refused the request as unauthorised. If you entered a username and password in the plugin settings, check them, or clear both to browse anonymously.");
 
             if (response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests && attempt < maxRetries)
             {
