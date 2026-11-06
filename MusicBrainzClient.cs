@@ -28,18 +28,26 @@ internal sealed class MusicBrainzClient : IDisposable
     /// <summary>How many times a rate-limited or error-bodied answer is retried before giving up (from the Max Retries setting).</summary>
     public int MaxRetries { get; set; } = 4;
 
-    public MusicBrainzClient(string userAgent, string? username, string? password)
+    /// <param name="inner">Test seam: a stand-in for the network. When given, the account is still passed in but the stand-in answers, so a test can prove the account never reaches an error. Production passes nothing.</param>
+    public MusicBrainzClient(string userAgent, string? username, string? password, HttpMessageHandler? inner = null)
     {
         // ~0.91 req/s -- under MusicBrainz's documented 1 req/s-per-IP limit regardless of
         // whether this client authenticates (see this class's own doc for why authentication
         // does not raise the limit here).
         _minInterval = TimeSpan.FromMilliseconds(1100);
 
-        var handler = new HttpClientHandler();
-        if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+        HttpMessageHandler handler;
+        if (inner is not null)
+            handler = inner;
+        else
         {
-            handler.Credentials = new NetworkCredential(username, password);
-            handler.PreAuthenticate = true;
+            var real = new HttpClientHandler();
+            if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+            {
+                real.Credentials = new NetworkCredential(username, password);
+                real.PreAuthenticate = true;
+            }
+            handler = real;
         }
 
         _http = new HttpClient(handler);

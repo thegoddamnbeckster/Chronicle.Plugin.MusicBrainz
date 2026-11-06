@@ -3,8 +3,8 @@ using Xunit;
 
 namespace Chronicle.Plugin.MusicBrainz.Tests;
 
-/// <summary>The checklist's C4 and K10: a rejected account is one call and an auth error; endless slow-downs end as a rate limit.
-/// (K7 for this plugin stays unproven: its credentials are applied inside the production handler, which has no test seam.)</summary>
+/// <summary>The checklist's C4, K7 and K10: a rejected account is one call and an auth error; a failing call never echoes the account;
+/// endless slow-downs end as a rate limit. (The production constructor takes an optional stand-in handler for exactly this.)</summary>
 public class SecretProofTests
 {
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> answer) : HttpMessageHandler
@@ -25,6 +25,28 @@ public class SecretProofTests
         var ex = await Assert.ThrowsAsync<Chronicle.Plugins.PluginAuthException>(() => client.GetAsync("artist/x", default));
         Assert.Equal(1, h.Calls);
         Assert.False(string.IsNullOrWhiteSpace(ex.Message));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.BadGateway)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task A_failing_call_leaves_the_account_out_of_the_error(HttpStatusCode code)
+    {
+        const string User = "SECRET-USER-1234567890";
+        const string Pass = "SECRET-PASS-0987654321";
+        var h = new Handler(_ =>
+        {
+            var r = new HttpResponseMessage(code);
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(1));
+            return r;
+        });
+        var client = new MusicBrainzClient("Chronicle-Test/1.0", User, Pass, h) { MaxRetries = 1 };
+        var ex = await Record.ExceptionAsync(() => client.GetAsync("artist/x", default));
+        Assert.NotNull(ex);
+        Assert.DoesNotContain(User, ex!.ToString());
+        Assert.DoesNotContain(Pass, ex.ToString());
     }
 
     [Theory]
