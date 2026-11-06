@@ -29,7 +29,7 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
         ],
     };
     public string Name     => "MusicBrainz";
-    public string Version  => "1.0.4";
+    public string Version  => System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(typeof(MusicBrainzMetadataProvider).Assembly)?.InformationalVersion.Split('+')[0] ?? "1.4.1";
     public string Author   => "Chronicle Contributors";
 
     // ── Settings keys ─────────────────────────────────────────────────────────
@@ -811,11 +811,8 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
 
     // ── IMetadataProvider: image ──────────────────────────────────────────────
 
-    public async Task<byte[]> GetImageAsync(string url, CancellationToken ct = default)
-    {
-        EnsureConfigured();
-        return await _client!.GetBytesAsync(url, ct).ConfigureAwait(false);
-    }
+    public Task<byte[]> GetImageAsync(string url, CancellationToken ct = default)
+        => throw new NotSupportedException("Images are loaded by the browser straight from the address in the metadata; this plugin has nothing to fetch.");
 
     // ── IMetadataProvider: health ─────────────────────────────────────────────
 
