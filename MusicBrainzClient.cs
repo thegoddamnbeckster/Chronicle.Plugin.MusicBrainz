@@ -54,7 +54,37 @@ internal sealed class MusicBrainzClient : IDisposable
         _http = new HttpClient(handler);
         _http.DefaultRequestHeaders.Add("User-Agent", userAgent);
         _http.DefaultRequestHeaders.Add("Accept", "application/json");
-        _http.Timeout = TimeSpan.FromSeconds(25);   // the host gives a call 25 s; waiting longer only holds the connection after it has gone
+        // One REQUEST may take this long. It used to be 25 s, because the host gave a whole call 25 s; the manifest now declares a call
+        // deadline of hours (call_timeout_seconds), so a single slow answer (a browse page of 100 recordings, a busy Cover Art Archive)
+        // must not end a fetch that has already made hundreds of requests -- it did: three artists failed 76 to 212 s in, on one request
+        // that took more than 25 s (2026-11-07). A request that still times out is asked again (see GetOrRetryOnTimeoutAsync).
+        _http.Timeout = TimeSpan.FromSeconds(90);
+    }
+
+    /// <summary>
+    /// One GET, asked again when the HttpClient's own timeout cancels it (not when the caller cancels). A service that is merely slow
+    /// for one request must not fail the whole fetch around it; after <see cref="MaxRetries"/> further tries the failure is reported
+    /// as the timeout it is, so the host retries the item later.
+    /// </summary>
+    private async Task<HttpResponseMessage> GetOrRetryOnTimeoutAsync(string url, CancellationToken ct)
+    {
+        var delay = TimeSpan.FromSeconds(2);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await _http.GetAsync(url, ct);
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                if (attempt >= MaxRetries)
+                    throw new HttpRequestException(
+                        $"No answer within {_http.Timeout.TotalSeconds:0} s after {attempt + 1} attempt(s): {new Uri(url).AbsolutePath}", ex);
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+                await ThrottleAsync(ct);
+            }
+        }
     }
 
     /// <summary>Test-only constructor that accepts a pre-built HttpClient and throttle interval.</summary>
@@ -79,7 +109,7 @@ internal sealed class MusicBrainzClient : IDisposable
             var url = _http.BaseAddress is not null
                 ? new Uri(_http.BaseAddress, path.TrimStart('/')).ToString()
                 : $"{BaseUrl}/{path.TrimStart('/')}";
-            var response = await _http.GetAsync(url, ct);
+            var response = await GetOrRetryOnTimeoutAsync(url, ct);
 
             if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                 throw new Chronicle.Plugins.PluginAuthException("chronicle.plugin.musicbrainz",
@@ -138,7 +168,7 @@ internal sealed class MusicBrainzClient : IDisposable
         for (int attempt = 0; ; attempt++)
         {
             await ThrottleAsync(ct);
-            var response = await _http.GetAsync(url, ct);
+            var response = await GetOrRetryOnTimeoutAsync(url, ct);
             if (response.IsSuccessStatusCode)
                 return _resume.Put(url, await response.Content.ReadAsStringAsync(ct));
 
