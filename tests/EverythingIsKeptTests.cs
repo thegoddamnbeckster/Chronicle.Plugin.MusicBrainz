@@ -37,11 +37,12 @@ public class EverythingIsKeptTests
         var h = new Handler(req =>
         {
             var u = req.RequestUri!.ToString();
-            if (u.Contains("/recording/")) return Json(Recording(tags: 45, releases: 23, works: 7));
+            if (u.Contains("/recording/")) return Json(Recording(tags: 45, releases: 0, works: 7));
+            if (u.Contains("/release?recording=")) return Json("{\"release-count\":23,\"releases\":[" + string.Join(",", Enumerable.Range(1, 23).Select(i => "{\"id\":\"rel-" + i + "\",\"title\":\"Release " + i + "\"}")) + "]}");
             if (u.Contains("/work/")) return Json("{\"id\":\"w\",\"title\":\"A Work\",\"relations\":[]}");
             return new HttpResponseMessage(HttpStatusCode.NotFound);   // cover art: none
         });
-        var client = new MusicBrainzClient("Chronicle-Test/1.0", null, null, h) { MaxRetries = 0 };
+        var client = new MusicBrainzClient(new HttpClient(h), TimeSpan.Zero) { MaxRetries = 0 };   // no pacing in a test
 
         var meta = await MusicBrainzEntityFetcher.FetchRecordingAsync(client, "rec-1", default);
 

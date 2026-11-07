@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 
 namespace Chronicle.Plugin.MusicBrainz;
 
@@ -130,14 +131,88 @@ internal sealed class MusicBrainzClient : IDisposable
     /// </summary>
     public async Task<string> GetCoverArtAsync(string path, CancellationToken ct = default)
     {
-        await ThrottleAsync(ct);
         var url = $"{CoverArtBase}/{path.TrimStart('/')}";
-        var response = await _http.GetAsync(url, ct);
-        if (response.IsSuccessStatusCode)
-            return await response.Content.ReadAsStringAsync(ct);
-        // Any non-success (404 = no art, 401/403/500 = CAA unavailable for this release)
-        // is treated as "no cover art available" — never throw from a supplemental fetch.
-        return "{}";
+        if (_resume.TryGet(url) is { } known) return known;   // answered earlier in a fetch that did not finish: not asked again
+
+        var delay = TimeSpan.FromSeconds(2);
+        for (int attempt = 0; ; attempt++)
+        {
+            await ThrottleAsync(ct);
+            var response = await _http.GetAsync(url, ct);
+            if (response.IsSuccessStatusCode)
+                return _resume.Put(url, await response.Content.ReadAsStringAsync(ct));
+
+            // A busy or failing archive is NOT "no cover art": that answer is kept as the item's complete data and never asked again.
+            // Wait and ask again; if it stays down, fail the fetch so the host tries the item later (what was already fetched is kept).
+            if (response.StatusCode is System.Net.HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
+            {
+                if (attempt >= MaxRetries)
+                    throw new HttpRequestException(
+                        $"The Cover Art Archive kept answering {(int)response.StatusCode} for {path}", null, response.StatusCode);
+                if (response.Headers.RetryAfter?.Delta is { } ra && ra > TimeSpan.Zero) delay = ra > TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(30) : ra;
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
+                continue;
+            }
+
+            // 404 (no images for this release or group) and the other client errors (400/401/403) are the archive's real answer: no art.
+            return _resume.Put(url, "{}");
+        }
+    }
+
+    /// <summary>
+    /// Every entity of one kind linked to another, all of them: a lookup returns at most 25 of any list (an artist with 1,363 release
+    /// groups showed 25), so the rest is read by browsing, a hundred at a time, until the count MusicBrainz reports is reached.
+    /// <paramref name="entity"/> is the singular name ("release-group", "release", "recording", "work"); <paramref name="linkParam"/> names
+    /// what they are linked to ("artist", "release-group", "recording"). Each page is remembered, so a fetch that fails near its end
+    /// resumes from there when the item is tried again instead of starting over. Items come back exactly as MusicBrainz sent them.
+    /// </summary>
+    public async Task<List<JsonElement>> BrowseAllAsync(string entity, string linkParam, string mbid, string? inc, CancellationToken ct = default)
+    {
+        const int pageSize = 100;
+        var all = new List<JsonElement>();
+        var incPart = string.IsNullOrEmpty(inc) ? "" : $"&inc={inc}";
+        var offset = 0;
+        while (true)
+        {
+            var path = $"{entity}?{linkParam}={mbid}{incPart}&limit={pageSize}&offset={offset}&fmt=json";
+            var body = _resume.TryGet(path);
+            if (body is null) body = _resume.Put(path, await GetAsync(path, ct));
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            var n = 0;
+            if (root.TryGetProperty($"{entity}s", out var items) && items.ValueKind == JsonValueKind.Array)
+                foreach (var item in items.EnumerateArray()) { all.Add(item.Clone()); n++; }
+            var total = root.TryGetProperty($"{entity}-count", out var c) && c.TryGetInt32(out var tc) ? tc : all.Count;
+            offset += n;
+            if (n == 0 || offset >= total) return all;   // an empty page ends it too: a count that never arrives cannot loop for ever
+        }
+    }
+
+    /// <summary>GET that remembers its answer (see <see cref="BrowseAllAsync"/>): for the many lookups inside one long fetch.</summary>
+    public async Task<string> GetResumableAsync(string path, CancellationToken ct = default) =>
+        _resume.TryGet(path) ?? _resume.Put(path, await GetAsync(path, ct));
+
+    // What this client has already been told in fetches that have not finished: a long fetch that fails near its end resumes from there.
+    private readonly ResumeCache _resume = new();
+
+    private sealed class ResumeCache
+    {
+        private const long MaxBytes = 192L * 1024 * 1024;   // memory only; when full it starts over (it is a convenience, never the data)
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, string Body)> _byUrl = new();
+        private long _bytes;
+        private static readonly TimeSpan Fresh = TimeSpan.FromHours(6);
+
+        public string? TryGet(string key) =>
+            _byUrl.TryGetValue(key, out var e) && DateTime.UtcNow - e.At < Fresh ? e.Body : null;
+
+        public string Put(string key, string body)
+        {
+            if (Interlocked.Add(ref _bytes, body.Length * 2L) > MaxBytes) { _byUrl.Clear(); Interlocked.Exchange(ref _bytes, body.Length * 2L); }
+            _byUrl[key] = (DateTime.UtcNow, body);
+            return body;
+        }
     }
 
     /// <summary>Download raw image bytes (auto-throttled).</summary>

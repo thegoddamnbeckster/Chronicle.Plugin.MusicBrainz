@@ -7,13 +7,13 @@ namespace Chronicle.Plugin.MusicBrainz;
 internal static class MusicBrainzEntityFetcher
 {
     private const string ArtistIncludes =
-        "recordings+releases+release-groups+works+aliases+tags+genres+ratings+url-rels+artist-rels";
+        "aliases+tags+genres+ratings+url-rels+artist-rels";   // the release groups, releases, works and recordings are browsed in full (BrowseAllAsync): a lookup shows only 25 of each
     private const string ReleaseGroupIncludes =
-        "artists+releases+tags+genres+ratings+url-rels+artist-credits";
+        "artists+tags+genres+ratings+url-rels+artist-credits";   // the releases are browsed in full (BrowseAllAsync): a lookup shows 25
     private const string ReleaseIncludes =
         "artists+recordings+release-groups+labels+media+tags+genres+url-rels+artist-credits+isrcs";
     private const string RecordingIncludes =
-        "artists+releases+release-groups+tags+genres+isrcs+url-rels+artist-rels+work-rels+artist-credits";
+        "artists+tags+genres+isrcs+url-rels+artist-rels+work-rels+artist-credits";   // the releases are browsed in full (BrowseAllAsync): a lookup shows 25
     private const string WorkIncludes =
         "artist-rels+url-rels";
 
@@ -29,11 +29,20 @@ internal static class MusicBrainzEntityFetcher
         // Artist image: Wikimedia Commons direct URL (converted from the page URL stored in MB)
         var artistImageUrl = ExtractWikimediaDirectImageUrl(artist.Relations);
 
-        // Fetch cover art from first 5 release groups — used as fallback poster and for the
+        // EVERYTHING MusicBrainz lists for the artist, not the 25 a lookup shows of each list (Elvis Presley: 1,363 release groups,
+        // 2,122 releases, 869 works, 35,767 recordings behind a lookup that showed 25 of each). The lists are browsed, a hundred at a
+        // time, and kept exactly as MusicBrainz sent them. A large artist takes many requests at one a second: the plugin declares
+        // a long call deadline for it (manifest call_timeout_seconds) and what is fetched is remembered if the fetch has to be retried.
+        var allReleaseGroups = await client.BrowseAllAsync("release-group", "artist", mbid, null, ct);
+        var allReleases      = await client.BrowseAllAsync("release",       "artist", mbid, null, ct);
+        var allWorks         = await client.BrowseAllAsync("work",          "artist", mbid, null, ct);
+        var allRecordings    = await client.BrowseAllAsync("recording",     "artist", mbid, null, ct);
+
+        // Cover art for EVERY release group (the artist's whole discography) — used as fallback poster and for the
         // additional images gallery (shows the artist's discography thumbnails).
         var allRawImages   = new List<CaaImage>();
         var releaseGroupArt = new List<object>();
-        foreach (var rg in (artist.ReleaseGroups ?? []).Take(5))
+        foreach (var rg in allReleaseGroups.Select(e => e.Deserialize<MbReleaseGroup>(MusicBrainzJsonOptions.Opts)).Where(g => g is not null).Select(g => g!))
         {
             if (rg.Id is null) continue;
             var images = await CoverArtArchiveClient.GetImagesAsync(client, "release-group", rg.Id, ct);
@@ -125,6 +134,10 @@ internal static class MusicBrainzEntityFetcher
                 .ToList(),
             externalUrls   = externalUrls,
             releaseGroupArt = releaseGroupArt,
+            allReleaseGroups = allReleaseGroups,
+            allReleases      = allReleases,
+            allWorks         = allWorks,
+            allRecordings    = allRecordings,
         });
 
         return new MediaMetadata
@@ -154,48 +167,40 @@ internal static class MusicBrainzEntityFetcher
         var rg = JsonSerializer.Deserialize<MbReleaseGroup>(json, MusicBrainzJsonOptions.Opts)
             ?? throw new InvalidOperationException($"Empty response for release-group {mbid}");
 
-        // Full release details (track listings, labels, barcodes, media) for a handful of
-        // releases. Deliberately capped low (was 20): each iteration is its own throttled
-        // round trip through MusicBrainzClient's global 1 req/sec (anonymous) limiter, so a
-        // release-group with many editions/reissues turned a single GetByIdAsync into 20+
-        // serial requests -- comfortably blowing past Chronicle's own 25s ProviderCallGuard
-        // ceiling (confirmed live: nearly every enrichment call was hitting that timeout,
-        // silently dropping this entire detail fetch on the floor every time it happened).
-        // A handful of releases is enough to populate label/track-listing data for the
-        // ExtendedData.releases blob without turning routine enrichment into a multi-minute
-        // operation -- this was never load-bearing for matching, only supplemental detail.
+        // EVERY release of the group, each in full (track listings, labels, barcodes, media): the lookup above shows only 25 releases, so
+        // they are browsed, and each one is its own lookup. A group with many editions takes many requests at one a second, well past the
+        // host's default 25 s for a call: the plugin declares a long call deadline in its manifest (call_timeout_seconds), and every
+        // answer is remembered so a fetch that fails near its end resumes instead of starting over. (The old caps of 3 and 5 releases
+        // were a workaround for that deadline; they dropped data.)
+        var releaseIds = (await client.BrowseAllAsync("release", "release-group", mbid, null, ct))
+            .Select(e => e.TryGetProperty("id", out var i) ? i.GetString() : null)
+            .Where(i => i is not null).Select(i => i!).ToList();
         var releases = new List<object>();
         string? firstLabel = null;
-        foreach (var release in (rg.Releases ?? []).Take(3))
+        foreach (var releaseId in releaseIds)
         {
-            if (release.Id is null) continue;
-            var releaseJson = await client.GetAsync($"release/{release.Id}?inc={ReleaseIncludes}&fmt=json", ct);
+            var releaseJson = await client.GetResumableAsync($"release/{releaseId}?inc={ReleaseIncludes}&fmt=json", ct);
             var full = JsonSerializer.Deserialize<MbRelease>(releaseJson, MusicBrainzJsonOptions.Opts);
             if (full is null) continue;
             releases.Add(MapRelease(full));
             firstLabel ??= full.LabelInfo?.Select(li => li.Label?.Name).FirstOrDefault(n => n is not null);
         }
 
-        // Cover art: try release-group level first (preferred, single canonical image set).
-        // Many singles and EPs have art uploaded per-release but not at the release-group level;
-        // fall back to the first few individual releases when the release-group has no images.
+        // Cover art: the release-group level first (the canonical image set), then EVERY release's own art (editions differ, and many
+        // singles and EPs have art uploaded per release but not for the group). All of it is kept.
         var images         = await CoverArtArchiveClient.GetImagesAsync(client, "release-group", mbid, ct);
         var frontImage     = images.FirstOrDefault(i => i.Front)?.Image ?? images.FirstOrDefault()?.Image;
         var backImage      = images.FirstOrDefault(i => i.Back && !i.Front)?.Image;
 
-        if (frontImage is null)
+        foreach (var releaseId in releaseIds)
         {
-            foreach (var release in (rg.Releases ?? []).Take(5))
-            {
-                if (release.Id is null) continue;
-                var rImages = await CoverArtArchiveClient.GetImagesAsync(client, "release", release.Id, ct);
-                if (rImages.Count == 0) continue;
-                images.AddRange(rImages);
-                frontImage ??= rImages.FirstOrDefault(i => i.Front)?.Image ?? rImages.FirstOrDefault()?.Image;
-                backImage  ??= rImages.FirstOrDefault(i => i.Back && !i.Front)?.Image;
-                if (frontImage is not null) break;
-            }
+            var rImages = await CoverArtArchiveClient.GetImagesAsync(client, "release", releaseId, ct);
+            if (rImages.Count == 0) continue;
+            images.AddRange(rImages);
+            frontImage ??= rImages.FirstOrDefault(i => i.Front)?.Image ?? rImages.FirstOrDefault()?.Image;
+            backImage  ??= rImages.FirstOrDefault(i => i.Back && !i.Front)?.Image;
         }
+        images = images.DistinctBy(i => i.Id ?? i.Image).ToList();   // a group's art is a copy of one release's: kept once
 
         var additionalImages = BuildAdditionalImages(images);
 
@@ -293,12 +298,14 @@ internal static class MusicBrainzEntityFetcher
             }
         }
 
-        // Cover art from up to 5 releases — prefer studio album releases over compilations/singles.
-        // MusicBrainz returns releases in arbitrary order; a track may appear on dozens of
-        // compilations whose cover art has nothing to do with the original album.
-        var sortedReleases = (rec.Releases ?? [])
+        // EVERY release the recording appears on (a lookup shows 25), and the cover art of every one of them. The studio-album releases
+        // come first so the poster is theirs rather than a compilation's: a track may appear on dozens of compilations whose cover art
+        // has nothing to do with the original album. The rest are kept too, in the additional images.
+        var allReleases = (await client.BrowseAllAsync("release", "recording", mbid, "release-groups", ct))
+            .Select(e => e.Deserialize<MbRelease>(MusicBrainzJsonOptions.Opts)).Where(r => r is not null).Select(r => r!)
+            .ToList();
+        var sortedReleases = allReleases
             .OrderBy(r => IsStudioAlbum(r) ? 0 : 1)   // studio albums first
-            .Take(5)
             .ToList();
 
         string? coverUrl    = null;
@@ -357,7 +364,7 @@ internal static class MusicBrainzEntityFetcher
             arrangers      = arrangers.Distinct().ToList(),
             externalUrls   = externalUrls,
             works          = works,
-            releases       = (rec.Releases ?? []).Select(r => new
+            releases       = allReleases.Select(r => new
             {
                 mbid    = r.Id,
                 title   = r.Title,
