@@ -78,7 +78,6 @@ internal static class MusicBrainzEntityFetcher
             .OrderByDescending(t => t.Count)
             .Select(t => t.Name ?? "")
             .Where(n => n != "")
-            .Take(20)
             .ToList();
 
         // All cover art as AdditionalImages
@@ -212,7 +211,6 @@ internal static class MusicBrainzEntityFetcher
             .OrderByDescending(t => t.Count)
             .Select(t => t.Name ?? "")
             .Where(n => n != "")
-            .Take(20)
             .ToList();
 
         // Richer overview: "Album · Live · by Metallica (Deluxe edition)"
@@ -273,7 +271,7 @@ internal static class MusicBrainzEntityFetcher
         var composers  = new List<(string Name, string? Mbid)>();
         var lyricists  = new List<(string Name, string? Mbid)>();
         var arrangers  = new List<(string Name, string? Mbid)>();
-        foreach (var rel in (rec.Relations ?? []).Where(r => r.Work is not null).Take(3))
+        foreach (var rel in (rec.Relations ?? []).Where(r => r.Work is not null))   // every linked work, however many
         {
             if (rel.Work?.Id is null) continue;
             var workJson = await client.GetAsync($"work/{rel.Work.Id}?inc={WorkIncludes}&fmt=json", ct);
@@ -340,7 +338,6 @@ internal static class MusicBrainzEntityFetcher
             .OrderByDescending(t => t.Count)
             .Select(t => t.Name ?? "")
             .Where(n => n != "")
-            .Take(20)
             .ToList();
 
         var externalUrls = ExtractExternalUrls(rec.Relations);
@@ -360,7 +357,7 @@ internal static class MusicBrainzEntityFetcher
             arrangers      = arrangers.Distinct().ToList(),
             externalUrls   = externalUrls,
             works          = works,
-            releases       = (rec.Releases ?? []).Take(10).Select(r => new
+            releases       = (rec.Releases ?? []).Select(r => new
             {
                 mbid    = r.Id,
                 title   = r.Title,
