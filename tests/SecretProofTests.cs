@@ -63,6 +63,7 @@ public class SecretProofTests
         var client = new MusicBrainzClient(new HttpClient(h), TimeSpan.Zero) { MaxRetries = 2 };
         var ex = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync("artist/x", default));
         Assert.Equal(HttpStatusCode.TooManyRequests, ex.StatusCode);
+        Assert.Equal(TimeSpan.FromMilliseconds(1), ex.Data["RetryAfter"]);   // what MusicBrainz asked for, so Chronicle's queue holds the item that long
         Assert.Equal(3, h.Calls);
     }
 }

@@ -130,7 +130,8 @@ internal sealed class MusicBrainzClient : IDisposable
             // Out of retries while MusicBrainz is still saying "slow down": report it as a rate limit so the host pauses the pass
             // instead of counting it as this item's failure.
             if (response.StatusCode is System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.TooManyRequests)
-                throw new HttpRequestException("MusicBrainz is rate limiting requests", null, System.Net.HttpStatusCode.TooManyRequests);
+                throw WithRetryAfter(new HttpRequestException("MusicBrainz is rate limiting requests", null, System.Net.HttpStatusCode.TooManyRequests),
+                                     response.Headers.RetryAfter?.Delta);
 
             response.EnsureSuccessStatusCode();
             var content = await response.Content.ReadAsStringAsync(ct);
@@ -177,8 +178,9 @@ internal sealed class MusicBrainzClient : IDisposable
             if (response.StatusCode is System.Net.HttpStatusCode.TooManyRequests || (int)response.StatusCode >= 500)
             {
                 if (attempt >= MaxRetries)
-                    throw new HttpRequestException(
-                        $"The Cover Art Archive kept answering {(int)response.StatusCode} for {path}", null, response.StatusCode);
+                    throw WithRetryAfter(new HttpRequestException(
+                        $"The Cover Art Archive kept answering {(int)response.StatusCode} for {path}", null, response.StatusCode),
+                        response.Headers.RetryAfter?.Delta);
                 if (response.Headers.RetryAfter?.Delta is { } ra && ra > TimeSpan.Zero) delay = ra > TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(30) : ra;
                 await Task.Delay(delay, ct);
                 delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 30));
@@ -188,6 +190,17 @@ internal sealed class MusicBrainzClient : IDisposable
             // 404 (no images for this release or group) and the other client errors (400/401/403) are the archive's real answer: no art.
             return _resume.Put(url, "{}");
         }
+    }
+
+
+    /// <summary>
+    /// Says how long the provider asked clients to wait, on the exception, under the key Chronicle's queue reads
+    /// (<c>Data["RetryAfter"]</c>, a TimeSpan): the host never waits less, and an item held for a long time goes to the back of the queue.
+    /// </summary>
+    private static HttpRequestException WithRetryAfter(HttpRequestException ex, TimeSpan? after)
+    {
+        if (after is { } a && a > TimeSpan.Zero) ex.Data["RetryAfter"] = a;
+        return ex;
     }
 
     /// <summary>
