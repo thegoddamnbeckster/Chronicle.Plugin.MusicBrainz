@@ -1,3 +1,5 @@
+using System.Text.Json;
+using Chronicle.Plugin.MusicBrainz.Models;
 using Chronicle.Plugins;
 using Chronicle.Plugins.Models;
 
@@ -722,6 +724,67 @@ public sealed class MusicBrainzMetadataProvider : IMetadataProvider, IExternalId
     private static string Normalize(string s) =>
         System.Text.RegularExpressions.Regex.Replace(s.Trim(), @"[:\-,\.']", " ")
             .Replace("  ", " ").Trim().ToLowerInvariant();
+
+    // ── IMetadataProvider: what is beneath an item ────────────────────────────
+
+    /// <summary>
+    /// An artist's albums and EPs (each a release group, carrying its own id so its tracks can be asked for in turn), or an album's
+    /// tracks in listed order, numbered across discs. Singles, broadcasts and the like are not albums and are left out.
+    /// </summary>
+    public async Task<IReadOnlyList<ProviderChild>> GetChildrenAsync(
+        string externalId, int hierarchyLevel, CancellationToken ct = default)
+    {
+        EnsureConfigured();
+        if (externalId.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            externalId = NormalizeUrl(externalId);
+        var sep = externalId.IndexOf(':');
+        if (sep < 0) return [];
+        var type = externalId[..sep];
+        var mbid = externalId[(sep + 1)..];
+
+        switch (type)
+        {
+            case "artist":
+            {
+                var groups = (await _client!.BrowseAllAsync("release-group", "artist", mbid, null, ct))
+                    .Select(e => e.Deserialize<MbReleaseGroup>(MusicBrainzJsonOptions.Opts))
+                    .Where(g => g?.Id is not null && !string.IsNullOrWhiteSpace(g.Title)
+                                && (string.Equals(g.PrimaryType, "Album", StringComparison.OrdinalIgnoreCase)
+                                    || string.Equals(g.PrimaryType, "EP", StringComparison.OrdinalIgnoreCase)))
+                    .Select(g => g!)
+                    .OrderBy(g => string.IsNullOrEmpty(g.FirstReleaseDate) ? "9999" : g.FirstReleaseDate, StringComparer.Ordinal)
+                    .ToList();
+                return groups.Select((g, i) => new ProviderChild(
+                    g.Title!, Number: i + 1, ExternalId: $"release-group:{g.Id}", Year: MusicBrainzSearcher.ParseYear(g.FirstReleaseDate))).ToList();
+            }
+            case "release-group":
+            {
+                // The earliest official release is the album as first issued; a group with no official release uses its earliest of any.
+                var releases = (await _client!.BrowseAllAsync("release", "release-group", mbid, null, ct))
+                    .Select(e => e.Deserialize<MbRelease>(MusicBrainzJsonOptions.Opts))
+                    .Where(r => r?.Id is not null).Select(r => r!)
+                    .OrderBy(r => string.Equals(r.Status, "Official", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                    .ThenBy(r => string.IsNullOrEmpty(r.Date) ? "9999" : r.Date, StringComparer.Ordinal)
+                    .ToList();
+                if (releases.Count == 0) return [];
+
+                var json = await _client.GetResumableAsync($"release/{releases[0].Id}?inc=recordings&fmt=json", ct);
+                var release = JsonSerializer.Deserialize<MbRelease>(json, MusicBrainzJsonOptions.Opts);
+                var tracks = new List<ProviderChild>();
+                foreach (var medium in release?.Media ?? [])
+                    foreach (var track in medium.Tracks ?? [])
+                    {
+                        var title = track.Title ?? track.Recording?.Title;
+                        if (string.IsNullOrWhiteSpace(title)) continue;
+                        tracks.Add(new ProviderChild(title, Number: tracks.Count + 1,
+                            RuntimeMinutes: track.Length is > 0 ? (int)Math.Round(track.Length.Value / 60000.0) : null));
+                    }
+                return tracks;
+            }
+            default:
+                return [];
+        }
+    }
 
     // ── IMetadataProvider: get by ID ──────────────────────────────────────────
 

@@ -255,11 +255,30 @@ internal static class MusicBrainzEntityFetcher
             BackdropUrl      = backImage,
             Genres           = (rg.Genres ?? []).Select(g => g.Name ?? "").Where(g => g != "").ToList(),
             Cast             = creditedArtists,
+            Lineage          = ArtistLineage(rg.ArtistCredit),
             Tags             = tags,
             Rating           = rg.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
             AdditionalImages = additionalImages,
             ExtendedData     = extendedData,
         };
+    }
+
+    /// <summary>The credited artist an album or track sits under; none when MusicBrainz names no artist with an id.</summary>
+    private static List<ProviderAncestor> ArtistLineage(List<MbArtistCredit>? credits)
+    {
+        var artist = (credits ?? []).Select(c => c.Artist).FirstOrDefault(a => a?.Id is not null && !string.IsNullOrWhiteSpace(a.Name));
+        return artist is null ? [] : [new ProviderAncestor(artist.Name!, $"artist:{artist.Id}")];
+    }
+
+    /// <summary>A track sits under its artist and the album it first appeared on (a studio album when there is one). Without a
+    /// known album it has no lineage, because the artist alone would file it a level too high.</summary>
+    private static List<ProviderAncestor> TrackLineage(List<MbArtistCredit>? credits, List<MbRelease> releasesStudioFirst)
+    {
+        var lineage = ArtistLineage(credits);
+        var album = releasesStudioFirst.Select(r => r.ReleaseGroup).FirstOrDefault(g => g?.Id is not null && !string.IsNullOrWhiteSpace(g.Title));
+        if (lineage.Count == 0 || album is null) return [];
+        lineage.Add(new ProviderAncestor(album.Title!, $"release-group:{album.Id}"));
+        return lineage;
     }
 
     // ── FetchRecordingAsync ───────────────────────────────────────────────────
@@ -386,6 +405,7 @@ internal static class MusicBrainzEntityFetcher
             RuntimeMinutes   = rec.Length.HasValue ? (int)Math.Round(rec.Length.Value / 60000.0) : null,
             Genres           = (rec.Genres ?? []).Select(g => g.Name ?? "").Where(g => g != "").ToList(),
             Cast             = creditedArtists,
+            Lineage          = TrackLineage(rec.ArtistCredit, sortedReleases),
             Crew             = crew,
             Tags             = tags,
             Rating           = rec.Rating?.Value * 2,   // MB is 0–5; Chronicle uses 0–10
